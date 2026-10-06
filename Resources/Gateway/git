@@ -1,0 +1,14 @@
+#!/bin/sh
+# Read-only Git entry point for the gateway. Never invoke custom diff programs.
+case "$1" in
+  diff)
+    shift
+    exec /usr/bin/git diff --no-ext-diff --no-textconv "$@"
+    ;;
+  status|rev-parse)
+    exec /usr/bin/git "$@"
+    ;;
+  *)
+    exit 126
+    ;;
+esac

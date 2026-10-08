@@ -1,11 +1,20 @@
 import Foundation
 
 enum GatewayDiagnosticsLog {
+    static func connectionSummary(_ diagnostics: ConnectionDiagnostics) -> String {
+        let checks = [("local-service", diagnostics.bridge), ("local-mcp", diagnostics.localMCP),
+                      ("public-https", diagnostics.publicEndpoint), ("public-mcp", diagnostics.publicMCP),
+                      ("endpoint-match", diagnostics.address)]
+        return checks.map { name, check in
+            "\(name)=\(check.state) dnsFailure=\(check.isDNSFailure) \(redacted(check.detail))"
+        }.joined(separator: "\n")
+    }
+
     static func redacted(_ text: String) -> String {
         var value = String(text.prefix(16_384))
         let patterns = [
             #"(?i)(bearer\s+)\S+"#,
-            #"(?i)((?:access[_-]?token|refresh[_-]?token|client[_-]?secret|admin[_-]?token|pairing[_-]?code|access[_-]?key|api[_-]?key|passcode|password|authorization|TS_AUTHKEY)[\"']?\s*[=:]\s*[\"']?)[^\s,\"'}]+"#,
+            #"(?i)((?:access[_-]?token|refresh[_-]?token|client[_-]?secret|admin[_-]?token|token|pairing[_-]?code|access[_-]?key|api[_-]?key|passcode|password|authorization|TS_AUTHKEY)[\"']?\s*[=:]\s*[\"']?)[^\s,\"'}]+"#,
             #"(?i)([?&](?:code|token|key|secret|state|access_token|refresh_token|access_key)=)[^&\s]+"#,
             #"(?i)\bBG-(?:[A-F0-9]{4}-){5}[A-F0-9]{4}\b"#,
             #"\b[A-Z2-9]{4}-[A-Z2-9]{4}\b"#,

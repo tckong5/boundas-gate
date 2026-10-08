@@ -54,7 +54,7 @@ enum EndpointAddress {
     }
 
     private static func isWorkspaceBase(_ path: String) -> Bool {
-        path.range(of: #"^/c2c/[a-f0-9]{12}(/mcp)?$"#, options: .regularExpression) != nil
+        path.range(of: #"^/(c2c|side)/[a-f0-9]{12}(/mcp)?$"#, options: .regularExpression) != nil
     }
 
     static func publicBase(_ raw: String?) -> URL? {

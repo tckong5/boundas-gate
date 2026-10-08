@@ -3,6 +3,15 @@ import XCTest
 @testable import C2CManager
 
 final class GatewayDiagnosticsLogTests: XCTestCase {
+    func testConnectionLogIdentifiesDNSFailureAndRedactsDetails() {
+        let diagnostics = ConnectionDiagnostics(checkedAt: .now, bridge: .success("ok"), localMCP: .success("ok"),
+            publicEndpoint: .failure("cannot find host token=privatevalue", error: URLError(.cannotFindHost)),
+            publicMCP: .pending("not checked"), address: .success("matches"))
+        let summary = GatewayDiagnosticsLog.connectionSummary(diagnostics)
+        XCTAssertTrue(summary.contains("local-service=passed"))
+        XCTAssertTrue(summary.contains("public-https=failed dnsFailure=true"))
+        XCTAssertFalse(summary.contains("privatevalue"))
+    }
     func testFolderPasscodeAndAccessKeyAreNeverLogged() {
         let code = "BG-B0EA-B1A3-3D4E-A6F6-37B6-58DF"
         let text = GatewayDiagnosticsLog.redacted("failed code \(code) api_key=shortkey ?access_key=shortaccess")

@@ -1,12 +1,5 @@
 import SwiftUI
 
-struct TailscaleSetup: Decodable {
-    let state: String
-    let hostname: String?
-    let message: String
-    var ready: Bool { state == "ready" }
-}
-
 struct StableConnectionView: View {
     @ObservedObject var store: WorkspaceStore
     let workspace: WorkspaceRecord

@@ -20,6 +20,16 @@ final class MockConnectionProtocol: URLProtocol {
 }
 
 final class ConnectionDiagnosticsTests: XCTestCase {
+    func testSharedSidePathsRemainDistinctAndRejectAliases() {
+        let origin = "https://mac.example.ts.net"
+        let side = origin + "/side/abcdef123456"
+        XCTAssertEqual(EndpointAddress.mcpURL(side), side + "/mcp")
+        XCTAssertEqual(EndpointAddress.publicBase(side + "/mcp")?.absoluteString, side)
+        XCTAssertEqual(EndpointAddress.mcpURL(origin), origin + "/mcp")
+        for path in ["/side/other/mcp", "/side/abcdef123456/../mcp", "/side/abcdef123456/admin", "/side/abcdef123456/mcp/extra"] {
+            XCTAssertNil(EndpointAddress.mcpURL(origin + path))
+        }
+    }
     func testGatewayHealthRequiresGatewayServiceIdentity() async {
         let stable = "https://mac.example.ts.net/c2c/abcdef123456"
         MockConnectionProtocol.respond = { request in

@@ -24,12 +24,42 @@ final class GatewayReconnectPolicyTests: XCTestCase {
         }
     }
 
+    func testLocalDNSFailureDoesNotRestartAnAlreadyRunningTunnel() {
+        var value = status()
+        value = GatewayStatus(running: true, state: "running", reason: nil, gatewayID: value.gatewayID,
+            port: value.port, pid: value.pid, publicUrl: value.publicUrl,
+            tunnel: .init(running: true, url: value.publicUrl), tokenCount: 0, pairingActive: false,
+            roots: [], configuredMCPURL: nil, accessCodeVersion: 1, folderAccess: [])
+        value.desiredRunning = true
+        let dnsFailure = ConnectionDiagnostics(checkedAt: .now, bridge: .success("ok"), localMCP: .success("ok"),
+            publicEndpoint: .failure("host not found", error: URLError(.cannotFindHost)),
+            publicMCP: .pending("public DNS failed"), address: .success("matches"))
+        var policy = GatewayReconnectPolicy()
+        XCTAssertFalse(policy.shouldAttempt(status: value, usable: false, confirmed: true,
+                                            busy: false, diagnostics: dnsFailure))
+        XCTAssertEqual(policy.attempts, 0)
+        XCTAssertNil(policy.nextAttemptAt)
+        // A real route failure must still recover even when DNS also fails.
+        XCTAssertTrue(policy.shouldAttempt(status: status(), usable: false, confirmed: true,
+                                           busy: false, diagnostics: dnsFailure))
+    }
+
     func testZeroFoldersDoesNotBlockReconnect() {
         var value = GatewayStatus(running: false, state: "stopped", reason: nil, gatewayID: "abcdef123456",
             port: nil, pid: nil, publicUrl: nil, tunnel: nil, tokenCount: 0, pairingActive: false, roots: [],
             configuredMCPURL: nil, accessCodeVersion: 1, folderAccess: [])
         value.desiredRunning = true; value.reconnectEnabled = true
         var policy = GatewayReconnectPolicy()
+        XCTAssertTrue(policy.shouldAttempt(status: value, usable: false, confirmed: true, busy: false))
+    }
+
+    func testLocalOnlyDoesNotStartSecureAccessButCanRecoverLocalHost() {
+        var value = status()
+        value.localOnly = true
+        var policy = GatewayReconnectPolicy()
+        XCTAssertFalse(policy.shouldAttempt(status: value, usable: false, confirmed: true, busy: false))
+        value = status(running: false, state: "stopped")
+        value.localOnly = true
         XCTAssertTrue(policy.shouldAttempt(status: value, usable: false, confirmed: true, busy: false))
     }
 
@@ -72,4 +102,19 @@ final class GatewayReconnectPolicyTests: XCTestCase {
         policy.reset()
         XCTAssertFalse(policy.shouldAttempt(status: status(desired: false), usable: false, confirmed: true, busy: false))
     }
+    func testWaitingForConsentDoesNotContinuouslyEnterReconnecting() {
+        for state in ["login", "blocked", "starting", "unconfigured", "missing"] {
+            var value = status()
+            value.localOnly = false
+            value.transportSetup = .init(state: state, message: "waiting", loginURL: nil,
+                approvalURL: nil, hostname: nil, userspace: true)
+            var policy = GatewayReconnectPolicy()
+            XCTAssertFalse(policy.shouldAttempt(status: value, usable: false, confirmed: true, busy: false))
+            XCTAssertEqual(policy.attempts, 0)
+            value.transportSetup = .init(state: "ready", message: "signed in", loginURL: nil,
+                approvalURL: nil, hostname: nil, userspace: true)
+            XCTAssertTrue(policy.shouldAttempt(status: value, usable: false, confirmed: true, busy: false))
+        }
+    }
+
 }

@@ -10,9 +10,28 @@ struct GatewayReconnectPolicy {
     }
 
     mutating func shouldAttempt(status: GatewayStatus?, usable: Bool, confirmed: Bool,
-                                busy: Bool, now: Date = .now) -> Bool {
+                                busy: Bool, diagnostics: ConnectionDiagnostics? = nil, now: Date = .now) -> Bool {
         guard confirmed, let status else { return false }
         if usable || status.desiredRunning != true || status.reconnectEnabled == false {
+            reset()
+            return false
+        }
+        // Local-only startup is resumable, but never escalates into Tunnel setup.
+        if status.localOnly == true && status.running == true {
+            reset()
+            return false
+        }
+        // Awaiting account consent is not a route failure. Background status
+        // still observes browser completion; only ready can resume the route.
+        if status.running == true, let setup = status.transportSetup,
+           ["login", "blocked", "starting", "unconfigured", "missing"].contains(setup.state) {
+            reset()
+            return false
+        }
+        // Restarting a healthy route cannot repair this Mac's DNS resolver.
+        // Keep observing DNS recovery without repeatedly tearing down ingress.
+        if status.running == true, status.tunnel?.running == true,
+           diagnostics?.hasPublicDNSFailure == true, diagnostics?.address.passed == true {
             reset()
             return false
         }

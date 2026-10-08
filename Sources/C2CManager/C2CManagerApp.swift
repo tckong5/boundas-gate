@@ -7,7 +7,7 @@ struct C2CManagerApp: App {
     @StateObject private var store = WorkspaceStore()
 
     var body: some Scene {
-        Window("Boundas Gate", id: "manager") {
+        Window(AppDataPaths.current.windowTitle, id: "manager") {
             ManagerWindow(store: store, appDelegate: appDelegate)
                 .frame(minWidth: 760, minHeight: 500)
         }

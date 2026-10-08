@@ -29,9 +29,8 @@ final class WorkspaceStore: ObservableObject {
     var healthyConnectionCount: Int { workspaces.filter { diagnostics[$0.id]?.isUsable == true }.count }
 
     init() {
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        configURL = support.appendingPathComponent("C2C Workspace Manager/workspaces.json")
-        c2cLogDirectory = support.appendingPathComponent("codex-with-chatgpt/logs")
+        configURL = AppDataPaths.current.workspaces
+        c2cLogDirectory = AppDataPaths.current.c2cLogs
         load()
         Task { [weak self] in
             while let self {

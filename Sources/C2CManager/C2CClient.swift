@@ -14,8 +14,8 @@ enum C2CClientError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .missingCLI: return "安裝包缺少連線元件，請重新安裝 Boundas Gate。"
-        case .missingNode: return "安裝包缺少執行元件，請重新安裝 Boundas Gate。"
+        case .missingCLI: return "安裝包缺少 Runtime/C2C/bin/c2c.js，請重新安裝 Boundas Gate。"
+        case .missingNode: return "安裝包缺少 Runtime/bin/node，請重新安裝 Boundas Gate。"
         case .invalidOutput(let detail): return "C2C 回傳資料無效：\(detail)"
         case .commandFailed(let detail): return detail
         }
@@ -52,22 +52,19 @@ struct C2CClient {
         }
     }
 
-    private var tailscaleLauncher: String {
-        if let resources = Bundle.main.resourceURL {
-            let file = resources.appendingPathComponent("Tailscale/launcher.mjs").path
-            if FileManager.default.fileExists(atPath: file) { return file }
-        }
-        return URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
-            .deletingLastPathComponent().appendingPathComponent("Resources/Tailscale/launcher.mjs").path
+    private func resource(_ name: String) throws -> String {
+        let sourceRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        return try RuntimePaths.current.resource(name, developerRoot: sourceRoot).path
     }
 
     func run(_ arguments: [String], entry: String? = nil) async throws -> CommandResult {
+        if let entry, !FileManager.default.fileExists(atPath: entry) { throw RuntimeResourceError.missing(URL(fileURLWithPath: entry).lastPathComponent) }
         guard FileManager.default.fileExists(atPath: cliPath) else { throw C2CClientError.missingCLI }
         guard let nodePath = Self.resolvedNodePath else { throw C2CClientError.missingNode }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: nodePath)
         process.arguments = [entry ?? cliPath] + arguments
-        var environment = ProcessInfo.processInfo.environment
+        var environment = AppDataPaths.current.childEnvironment(ProcessInfo.processInfo.environment)
         for key in ["NODE_OPTIONS", "NODE_PATH", "TS_AUTHKEY", "TS_AUTH_KEY", "TS_CLIENT_SECRET", "TSNET_FORCE_LOGIN"] {
             environment.removeValue(forKey: key)
         }
@@ -129,7 +126,7 @@ struct C2CClient {
     }
 
     func tailscaleSetup() async throws -> TailscaleSetup {
-        let result = try await run(["preflight"], entry: tailscaleLauncher)
+        let result = try await run(["preflight"], entry: resource("Tailscale/launcher.mjs"))
         guard result.code == 0, let data = result.output.data(using: .utf8),
               let setup = try? JSONDecoder().decode(TailscaleSetup.self, from: data) else {
             throw C2CClientError.commandFailed("未能檢查 Tailscale，請先開啟 Tailscale App。")
@@ -138,8 +135,7 @@ struct C2CClient {
     }
 
     func gateway(_ action: String, input: Data? = nil) async throws -> Data {
-        let helper = URL(fileURLWithPath: tailscaleLauncher).deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("Gateway/launcher.mjs").path
+        let helper = try resource("Gateway/launcher.mjs")
         let backend = URL(fileURLWithPath: cliPath).deletingLastPathComponent().deletingLastPathComponent().path
         var arguments = [action, backend]
         if let input, let json = String(data: input, encoding: .utf8) { arguments.append(json) }

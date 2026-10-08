@@ -7,6 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { Registry, secureWrite } from './registry.mjs';
 import { FolderAccess } from './access.mjs';
 import { instanceAuthStore } from './auth.mjs';
+import { clearOwnedRuntime } from './runtime-instance.mjs';
 import { gatewayProvider } from '../Tailscale/embedded.mjs';
 
 export async function loadBackend(backendRoot) {
@@ -90,7 +91,8 @@ export function makeMcpServer(backend, registry, access = new FolderAccess(regis
   return server;
 }
 
-export async function startGateway({ backendRoot, registry = new Registry(), tunnelProvider, persistRuntime = true, port = 0 }) {
+export async function startGateway({ backendRoot, registry = new Registry(), tunnelProvider, persistRuntime = true, port = 0,
+  instanceID = randomBytes(32).toString('hex'), runtimePath, authFile, service = 'boundas-gateway', sideRoot }) {
   const backend = await loadBackend(backendRoot);
   const config = registry.read();
   if (!config || !registry.active().length) throw new Error('請先揀至少一個要共用嘅 Folder。');
@@ -113,9 +115,12 @@ export async function startGateway({ backendRoot, registry = new Registry(), tun
   let localPort;
   let closed = false;
   const getBaseUrl = () => publicURL ?? `http://127.0.0.1:${localPort}`;
-  const runtimeFile = path.join(registry.directory, 'runtime.json');
-  const persist = () => { if (persistRuntime) secureWrite(runtimeFile, { service: 'boundas-gateway', workspaceId: config.id, pid: process.pid, port: localPort, adminToken, publicUrl: publicURL }); };
-  app.get('/health', (_req, res) => res.json({ service: 'boundas-gateway', workspaceId: config.id, status: 'ok' }));
+  const runtimeFile = runtimePath ?? path.join(registry.directory, 'runtime.json');
+  const startedAt = new Date().toISOString();
+  const runtimeRecord = () => ({ service, workspaceId: config.id, ...(sideRoot ? { workspaceRoot: sideRoot } : {}),
+    pid: process.pid, port: localPort, adminToken, publicUrl: publicURL, instanceID, startedAt });
+  const persist = () => { if (persistRuntime) secureWrite(runtimeFile, runtimeRecord()); };
+  app.get('/health', (_req, res) => res.json({ service, workspaceId: config.id, status: 'ok', instanceID, startedAt }));
   // Explicitly reject resource confusion without accepting a client's root grants.
   app.use(['/oauth/authorize', '/oauth/token'], backend.express.urlencoded({ extended: false, limit: '32kb' }), backend.express.json({ limit: '32kb' }), (req, res, next) => {
     const resource = req.query.resource ?? req.body?.resource;
@@ -131,7 +136,8 @@ export async function startGateway({ backendRoot, registry = new Registry(), tun
     next();
   };
   app.get('/control/info', admin, (_req, res) => {
-    try { res.json({ running: true, state: 'running', gatewayID: config.id, port: localPort, pid: process.pid, publicUrl: publicURL, tunnel: provider.status(), tokenCount: authStore.tokenCount(), pairingActive: pairing.hasActiveSession(), accessCodeVersion: 1, connectionVersion: 1, authorizationVersion: 2, folderAccess: access.status() }); }
+    try { res.json({ running: true, state: 'running', gatewayID: config.id, workspaceId: config.id, workspaceRoot: sideRoot,
+      instanceID, startedAt, port: localPort, pid: process.pid, publicUrl: publicURL, tunnel: provider.status(), tokenCount: authStore.tokenCount(), pairingActive: pairing.hasActiveSession(), accessCodeVersion: 1, connectionVersion: 1, authorizationVersion: 2, folderAccess: access.status() }); }
     catch { res.status(503).json({ message: '共用設定無效，已拒絕存取。' }); }
   });
   app.post('/control/code-policy', admin, backend.express.json({ limit: '2kb' }), (req, res) => {
@@ -172,8 +178,8 @@ export async function startGateway({ backendRoot, registry = new Registry(), tun
     await new Promise(resolve => server.close(resolve));
     await provider.stop().catch(() => {});
     if (persistRuntime) {
-      try { const runtime = JSON.parse(fs.readFileSync(runtimeFile, 'utf8')); if (runtime.adminToken === adminToken) fs.rmSync(runtimeFile); } catch {}
+      try { clearOwnedRuntime(runtimeFile, runtimeRecord()); } catch {}
     }
   }
-  return { port: localPort, id: config.id, authStore, provider, adminToken, registry, localBase: () => `http://127.0.0.1:${localPort}`, close };
+  return { port: localPort, id: config.id, authStore, provider, instanceID, adminToken, registry, localBase: () => `http://127.0.0.1:${localPort}`, close };
 }

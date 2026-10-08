@@ -4,6 +4,7 @@ import os from 'node:os';
 import http from 'node:http';
 import { randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
+import { withOwnerLock as withLock } from './owner-lock.mjs';
 
 export const stateDirectory = process.env.BOUNDAS_STATE_DIR ?? path.join(os.homedir(), 'Library/Application Support/C2C Workspace Manager/tailscale');
 export function findBinary() {
@@ -56,29 +57,7 @@ function writeLedger(directory, ledger) {
   fs.writeFileSync(temporary, JSON.stringify(ledger), { mode: 0o600 });
   fs.renameSync(temporary, file);
 }
-export async function withLock(directory, action) {
-  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const lock = path.join(directory, 'config.lock');
-  for (let attempt = 0; attempt < 80; attempt++) {
-    try {
-      fs.mkdirSync(lock, { mode: 0o700 });
-      fs.writeFileSync(path.join(lock, 'pid'), String(process.pid), { mode: 0o600 });
-      try { return await action(); } finally { fs.rmSync(lock, { recursive: true, force: true }); }
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw error;
-      try {
-        const pid = Number(fs.readFileSync(path.join(lock, 'pid'), 'utf8'));
-        if (Number.isInteger(pid) && pid > 0) {
-          try { process.kill(pid, 0); } catch (failure) {
-            if (failure.code === 'ESRCH') fs.rmSync(lock, { recursive: true, force: true });
-          }
-        }
-      } catch { /* Another process may still be writing its PID. */ }
-      await new Promise(resolve => setTimeout(resolve, 250));
-    }
-  }
-  throw new Error('另一個 Folder 正在設定固定地址，請稍後再試。');
-}
+export { withOwnerLock as withLock } from './owner-lock.mjs';
 function handlerEntries(config, key) { return Object.entries(config?.Web?.[key]?.Handlers ?? {}); }
 export function assertOwnedConfig(config, key, ledger) {
   if (config?.TCP?.['443'] && config.TCP['443'].HTTPS !== true) throw new Error('Tailscale 443 已經用於其他服務；未有更改。');

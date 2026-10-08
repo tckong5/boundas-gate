@@ -1,22 +1,20 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { Registry, secureWrite } from './registry.mjs';
 import { loadBackend, startGateway } from './server.mjs';
 import { withLock } from '../Tailscale/provider.mjs';
 import { gatewaySetup, transportMode } from '../Tailscale/embedded.mjs';
+import { readRuntime, observeRuntime } from './runtime-instance.mjs';
 
 const [action, backendRoot, input] = process.argv.slice(2);
 const registry = new Registry();
 const runtimeFile = path.join(registry.directory, 'runtime.json');
 const output = value => process.stdout.write(`${JSON.stringify(value)}\n`);
 function runtime() {
-  try {
-    const data = JSON.parse(fs.readFileSync(runtimeFile, 'utf8'));
-    if (data.service !== 'boundas-gateway' || !Number.isInteger(data.port) || data.port < 1 || data.port > 65535 || !Number.isInteger(data.pid) || data.pid < 1 || !/^bg_admin_[a-f0-9]{64}$/.test(data.adminToken)) throw new Error('invalid');
-    return data;
-  } catch (error) { if (error.code === 'ENOENT') return null; throw new Error('共用連線運行記錄無效；未有操作任何程序。'); }
+  return readRuntime(runtimeFile);
 }
 async function control(state, route, method = 'POST', timeout = 120000, body) {
   const response = await fetch(`http://127.0.0.1:${state.port}${route}`, { method, headers: { Authorization: `Bearer ${state.adminToken}`, ...(body ? { 'Content-Type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(timeout) });
@@ -25,17 +23,8 @@ async function control(state, route, method = 'POST', timeout = 120000, body) {
   return data;
 }
 async function observation() {
-  const state = runtime();
-  if (!state) return { state: 'stopped' };
-  try {
-    const response = await fetch(`http://127.0.0.1:${state.port}/health`, { signal: AbortSignal.timeout(2000) });
-    const body = await response.json();
-    if (body.service !== 'boundas-gateway' || body.workspaceId !== registry.read()?.id || body.workspaceId !== state.workspaceId) return { state: 'unknown', reason: '連到另一個服務，未有操作。' };
-    return { state: 'healthy', runtime: state, info: await control(state, '/control/info', 'GET', 3000) };
-  } catch {
-    try { process.kill(state.pid, 0); return { state: 'unknown', reason: '程序仍然存在，但未能確認連線；未有啟動另一個程序。' }; }
-    catch (error) { return error.code === 'ESRCH' ? { state: 'stopped' } : { state: 'unknown', reason: '未能確認程序狀態。' }; }
-  }
+  return observeRuntime(runtimeFile, { gateID: registry.read()?.id, service: 'boundas-gateway',
+    entrypoint: fileURLToPath(import.meta.url), getInfo: state => control(state, '/control/info', 'GET', 3000) });
 }
 async function status() {
   const config = registry.read();
@@ -52,7 +41,9 @@ async function status() {
 }
 try {
   if (action === 'daemon') {
-    const gateway = await startGateway({ backendRoot, registry });
+    const instanceID = input?.replace(/^--instance-id=/, '');
+    if (!/^[a-f0-9]{64}$/.test(instanceID ?? '')) throw new Error('Gate instance ID 無效。');
+    const gateway = await startGateway({ backendRoot, registry, instanceID });
     let closing = false;
     const close = () => { if (!closing) { closing = true; void gateway.close().finally(() => process.exit(0)); } };
     process.on('SIGTERM', close); process.on('SIGINT', close);
@@ -102,6 +93,13 @@ try {
     await withLock(registry.directory, async () => {
       let current = await observation();
       if (current.state === 'unknown') throw new Error(current.reason);
+      if (current.state === 'healthy' && current.legacy) {
+        await control(current.runtime, '/control/shutdown');
+        const deadline = Date.now() + 20000;
+        while (runtime() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 250));
+        current = await observation();
+        if (current.state !== 'stopped') throw new Error('舊 Gate 未完成停止，請稍後再試。');
+      }
       const connection = registry.connection();
       if (action === 'recover' && (!connection.reconnectEnabled || connection.desiredRunning === false
           || (connection.desiredRunning === null && current.state !== 'healthy'))) throw new Error('共用連線已由用戶停止，未有自動開啟。');
@@ -113,7 +111,7 @@ try {
         fs.mkdirSync(registry.directory, { recursive: true, mode: 0o700 });
         const logFile = path.join(registry.directory, 'gateway.log');
         const descriptor = fs.openSync(logFile, 'a', 0o600); fs.chmodSync(logFile, 0o600);
-        const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'daemon', backendRoot], { detached: true, stdio: ['ignore', descriptor, descriptor], env: process.env });
+        const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'daemon', backendRoot, `--instance-id=${randomBytes(32).toString('hex')}`], { detached: true, stdio: ['ignore', descriptor, descriptor], env: process.env });
         child.unref(); fs.closeSync(descriptor);
         const deadline = Date.now() + 20000;
         do {

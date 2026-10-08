@@ -33,20 +33,28 @@ type statusData struct {
 	state, hostname, loginURL              string
 	userspace, funnelAllowed, httpsEnabled bool
 }
+
+var errInvalidLoginURL = errors.New("Invalid Tailscale sign-in URL")
+var errLoginRejected = errors.New("Tailscale sign-in could not be started")
+
 type statusReply struct {
-	AccountManagementVersion int    `json:"accountManagementVersion"`
-	OK                       bool   `json:"ok"`
-	Service                  string `json:"service"`
-	ID                       string `json:"gatewayID"`
-	State                    string `json:"state"`
-	Message                  string `json:"message"`
-	Hostname                 string `json:"hostname,omitempty"`
-	LoginURL                 string `json:"loginURL,omitempty"`
-	ApprovalURL              string `json:"approvalURL,omitempty"`
-	Running                  bool   `json:"running"`
-	Userspace                bool   `json:"userspace"`
-	PublicURL                string `json:"publicUrl,omitempty"`
-	PID                      int    `json:"pid"`
+	RouteManagementVersion   int         `json:"routeManagementVersion"`
+	Routes                   []gateRoute `json:"routes,omitempty"`
+	BackendState             string      `json:"backendState,omitempty"`
+	AccountManagementVersion int         `json:"accountManagementVersion"`
+	LoginManagementVersion   int         `json:"loginManagementVersion"`
+	OK                       bool        `json:"ok"`
+	Service                  string      `json:"service"`
+	ID                       string      `json:"gatewayID"`
+	State                    string      `json:"state"`
+	Message                  string      `json:"message"`
+	Hostname                 string      `json:"hostname,omitempty"`
+	LoginURL                 string      `json:"loginURL,omitempty"`
+	ApprovalURL              string      `json:"approvalURL,omitempty"`
+	Running                  bool        `json:"running"`
+	Userspace                bool        `json:"userspace"`
+	PublicURL                string      `json:"publicUrl,omitempty"`
+	PID                      int         `json:"pid"`
 }
 type agent struct {
 	id          string
@@ -59,6 +67,8 @@ type agent struct {
 	running     bool
 	publicURL   string
 	approvalURL string
+	loginURL    string
+	routes      map[string]gateRoute
 	// Unit tests use a local status provider; production always uses tsnet.
 	statusSource func(context.Context) (*statusData, error)
 	listen       func() (net.Listener, error)
@@ -67,13 +77,19 @@ type agent struct {
 }
 
 func (a *agent) status(ctx context.Context) statusReply {
-	reply := statusReply{OK: true, Service: "boundas-tsnet", ID: a.id, PID: os.Getpid(), AccountManagementVersion: 1}
+	reply := statusReply{OK: true, Service: "boundas-tsnet", ID: a.id, PID: os.Getpid(), AccountManagementVersion: 1, LoginManagementVersion: 2, RouteManagementVersion: 1}
+	a.mu.Lock()
+	for _, route := range a.routes {
+		reply.Routes = append(reply.Routes, route)
+	}
+	a.mu.Unlock()
 	data, err := a.statusSource(ctx)
 	if err != nil {
 		reply.State = "starting"
 		reply.Message = "內置連線正在準備，請稍後再檢查。"
 		return reply
 	}
+	reply.BackendState = data.state
 	reply.Userspace = data.userspace
 	if !data.userspace {
 		reply.State = "blocked"
@@ -83,8 +99,17 @@ func (a *agent) status(ctx context.Context) statusReply {
 	reply.Hostname = data.hostname
 	if data.state != "Running" {
 		reply.State = "login"
+		if data.state == "Starting" || data.state == "NoState" {
+			reply.State = "starting"
+		}
 		reply.Message = "請登入內置 Tailscale 連線。"
-		if u, e := url.Parse(data.loginURL); e == nil && u.Scheme == "https" && u.Host == "login.tailscale.com" && u.User == nil {
+		a.mu.Lock()
+		loginURL := a.loginURL
+		a.mu.Unlock()
+		if data.loginURL != "" {
+			loginURL = data.loginURL
+		}
+		if u, e := url.Parse(loginURL); e == nil && u.Scheme == "https" && u.Host == "login.tailscale.com" && u.User == nil {
 			reply.LoginURL = u.String()
 		}
 		if data.state == "NeedsMachineAuth" {
@@ -93,6 +118,9 @@ func (a *agent) status(ctx context.Context) statusReply {
 		}
 		return reply
 	}
+	a.mu.Lock()
+	a.loginURL = ""
+	a.mu.Unlock()
 	if !validHostname.MatchString(data.hostname) {
 		reply.State = "blocked"
 		reply.Message = "請喺 Tailscale 啟用 MagicDNS。"
@@ -110,10 +138,68 @@ func (a *agent) status(ctx context.Context) statusReply {
 	reply.State = "ready"
 	reply.Message = "內置連線已登入。"
 	a.mu.Lock()
-	reply.Running = a.running && a.publicURL == "https://"+data.hostname+"/c2c/"+a.id
+	reply.Running = a.running && (a.publicURL == "https://"+data.hostname+"/c2c/"+a.id || a.publicURL == "https://"+data.hostname)
 	reply.PublicURL = a.publicURL
 	a.mu.Unlock()
 	return reply
+}
+
+type loginNotifications interface {
+	Next() (ipn.Notify, error)
+	Close() error
+}
+
+// Interactive login returns before the URL exists. Subscribe before requesting
+// it and consume BrowseToURL, the LocalAPI's documented delivery mechanism.
+func (a *agent) receiveLogin(ctx context.Context, watch func(context.Context) (loginNotifications, error), start func(context.Context) error) error {
+	w, err := watch(ctx)
+	if err != nil {
+		return err
+	}
+	defer w.Close()
+	if err = start(ctx); err != nil {
+		return err
+	}
+	for {
+		n, err := w.Next()
+		if err != nil {
+			return err
+		}
+		if n.ErrMessage != nil {
+			return errLoginRejected
+		}
+		if n.BrowseToURL != nil {
+			u, err := url.Parse(*n.BrowseToURL)
+			if err != nil || u.Scheme != "https" || u.Host != "login.tailscale.com" || u.User != nil {
+				return errInvalidLoginURL
+			}
+			a.mu.Lock()
+			a.loginURL = u.String()
+			a.mu.Unlock()
+			return nil
+		}
+		if n.State != nil && (*n.State == ipn.Running || *n.State == ipn.NeedsMachineAuth) {
+			return nil
+		}
+	}
+}
+
+// A reused logged-out tsnet node can be Stopped with WantRunning=false.
+// Resume only on explicit Sign In, after subscribing, then request its URL.
+func (a *agent) signIn(ctx context.Context, watch func(context.Context) (loginNotifications, error), resume, interactive func(context.Context) error) error {
+	data, err := a.statusSource(ctx)
+	if err != nil {
+		return err
+	}
+	if data.state == "Running" || data.state == "NeedsMachineAuth" {
+		return nil
+	}
+	return a.receiveLogin(ctx, watch, func(ctx context.Context) error {
+		if err := resume(ctx); err != nil {
+			return err
+		}
+		return interactive(ctx)
+	})
 }
 
 // Only MCP, OAuth, discovery and health are exposed. The helper accepts a local
@@ -139,6 +225,7 @@ func publicHandler(id string, port int) http.Handler {
 		for _, h := range []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "Proxy-Authorization", "Proxy-Connection"} {
 			r.Header.Del(h)
 		}
+		r.Header["X-Forwarded-For"] = nil // Suppress ReverseProxy automatic forwarding.
 		r.Header.Set("X-Forwarded-Proto", "https")
 	}, FlushInterval: -1, ErrorLog: log.New(os.Stderr, "proxy: ", 0), ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
 		http.Error(w, "Connection unavailable", http.StatusBadGateway)
@@ -172,6 +259,7 @@ func (a *agent) stop() {
 	a.listener = nil
 	a.running = false
 	a.publicURL = ""
+	a.routes = nil
 	a.mu.Unlock()
 	if web != nil {
 		_ = web.Close()
@@ -181,6 +269,10 @@ func (a *agent) stop() {
 	}
 }
 func (a *agent) control(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/routes/") {
+		a.routeControl(w, r)
+		return
+	}
 	if r.URL.Path == "/status" && r.Method == http.MethodGet {
 		ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
 		defer cancel()
@@ -190,7 +282,11 @@ func (a *agent) control(w http.ResponseWriter, r *http.Request) {
 	if (r.URL.Path == "/login" || r.URL.Path == "/logout") && r.Method == http.MethodPost {
 		a.op.Lock()
 		defer a.op.Unlock()
-		ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+		timeout := 8 * time.Second
+		if r.URL.Path == "/login" {
+			timeout = 40 * time.Second
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), timeout)
 		defer cancel()
 		action := a.login
 		if r.URL.Path == "/logout" {
@@ -204,10 +300,26 @@ func (a *agent) control(w http.ResponseWriter, r *http.Request) {
 			a.stop()
 			a.mu.Lock()
 			a.approvalURL = ""
+			a.loginURL = ""
 			a.mu.Unlock()
 		}
 		if err := action(ctx); err != nil {
-			replyJSON(w, 409, map[string]any{"ok": false, "message": "未能完成 Tunnel 登入／登出，請稍後再試。"})
+			message, code := "未能完成 Tunnel 登入／登出，請稍後再試。", "account_action_failed"
+			if r.URL.Path == "/login" {
+				message, code = "未能開始 Tailscale 登入，請重新檢查後再試。", "login_failed"
+				switch {
+				case errors.Is(err, context.DeadlineExceeded):
+					message, code = "Tailscale 登入回應逾時，請稍後再按 Sign In；原有設定已保留。", "login_timeout"
+				case errors.Is(err, errInvalidLoginURL):
+					message, code = "登入服務回傳無效網址，未有開啟瀏覽器。請稍後重試。", "login_url_invalid"
+				case errors.Is(err, errLoginRejected):
+					message, code = "Tailscale 未能開始登入，請重新檢查後再試。", "login_rejected"
+				}
+			}
+			diagnosticCtx, diagnosticCancel := context.WithTimeout(r.Context(), 2*time.Second)
+			state := a.status(diagnosticCtx)
+			diagnosticCancel()
+			replyJSON(w, 409, map[string]any{"ok": false, "message": message, "errorCode": code, "backendState": state.BackendState})
 			return
 		}
 		replyJSON(w, 200, a.status(ctx))
@@ -240,7 +352,7 @@ func (a *agent) control(w http.ResponseWriter, r *http.Request) {
 	a.op.Lock()
 	defer a.op.Unlock()
 	if r.URL.Path == "/stop" {
-		a.stop()
+		a.removeRoute(a.id, "")
 		replyJSON(w, 200, map[string]bool{"ok": true})
 		return
 	}
@@ -267,27 +379,19 @@ func (a *agent) control(w http.ResponseWriter, r *http.Request) {
 		replyJSON(w, 409, map[string]any{"ok": false, "message": "固定地址同原有 ChatGPT 設定唔一致；未有更改地址或授權。"})
 		return
 	}
-	a.stop()
-	ln, err := a.listen()
+	instance, err := inspectGate(ctx, gateRoute{GateID: a.id, Port: input.Port})
 	if err != nil {
+		replyJSON(w, 409, map[string]any{"ok": false, "message": "Gate runtime identity mismatch"})
+		return
+	}
+	if err := a.startRoute(gateRoute{GateID: a.id, Port: input.Port, InstanceID: instance, PublicURL: expected}); err != nil {
 		replyJSON(w, 409, map[string]any{"ok": false, "message": "內置公開連線未能啟動，請檢查 Tailscale HTTPS／Funnel 權限。"})
 		return
 	}
-	web := &http.Server{Handler: publicHandler(a.id, input.Port), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second}
 	a.mu.Lock()
-	a.listener = ln
-	a.web = web
 	a.running = true
 	a.publicURL = expected
 	a.mu.Unlock()
-	go func() {
-		_ = web.Serve(ln)
-		a.mu.Lock()
-		if a.web == web {
-			a.running = false
-		}
-		a.mu.Unlock()
-	}()
 	replyJSON(w, 200, map[string]any{"ok": true, "publicUrl": expected})
 }
 func serve(directory, id string) error {
@@ -345,7 +449,14 @@ func serve(directory, id string) error {
 		return err
 	}
 	a := &agent{id: id, node: node, client: client}
-	a.login = client.StartLoginInteractive
+	a.login = func(ctx context.Context) error {
+		return a.signIn(ctx, func(ctx context.Context) (loginNotifications, error) {
+			return client.WatchIPNBus(ctx, ipn.NotifyInitialState)
+		}, func(ctx context.Context) error {
+			_, err := client.EditPrefs(ctx, &ipn.MaskedPrefs{Prefs: ipn.Prefs{WantRunning: true}, WantRunningSet: true})
+			return err
+		}, client.StartLoginInteractive)
+	}
 	a.logout = client.Logout
 	a.statusSource = func(ctx context.Context) (*statusData, error) {
 		st, e := client.Status(ctx)

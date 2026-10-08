@@ -10,15 +10,87 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"tailscale.com/ipn"
 )
 
 const testID = "abcdef123456"
+
+type testLoginNotifications struct {
+	events []ipn.Notify
+	err    error
+	closed bool
+}
+
+func (w *testLoginNotifications) Next() (ipn.Notify, error) {
+	if len(w.events) == 0 {
+		return ipn.Notify{}, w.err
+	}
+	n := w.events[0]
+	w.events = w.events[1:]
+	return n, nil
+}
+func (w *testLoginNotifications) Close() error { w.closed = true; return nil }
+
+func TestInteractiveLoginSubscribesBeforeRequestAndReturnsAsyncURL(t *testing.T) {
+	a := readyAgent()
+	a.statusSource = func(context.Context) (*statusData, error) {
+		return &statusData{state: "NeedsLogin", userspace: true}, nil
+	}
+	loginURL := "https://login.tailscale.com/a/test"
+	needsLogin := ipn.NeedsLogin
+	w := &testLoginNotifications{events: []ipn.Notify{{State: &needsLogin}, {BrowseToURL: &loginURL}}}
+	subscribed := false
+	err := a.receiveLogin(context.Background(), func(context.Context) (loginNotifications, error) {
+		subscribed = true
+		return w, nil
+	}, func(context.Context) error {
+		if !subscribed {
+			t.Fatal("login requested before subscribing")
+		}
+		return nil
+	})
+	if err != nil || !w.closed || a.status(context.Background()).LoginURL != loginURL {
+		t.Fatal("asynchronous login URL was lost")
+	}
+	a.statusSource = readyAgent().statusSource
+	if a.status(context.Background()).LoginURL != "" || a.loginURL != "" {
+		t.Fatal("login URL survived successful sign-in")
+	}
+}
+
+func TestInteractiveLoginFailuresNeverSupplyAnUnsafeOrMissingURL(t *testing.T) {
+	for _, scenario := range []string{"timeout", "untrusted", "credentials", "request-failed"} {
+		t.Run(scenario, func(t *testing.T) {
+			a := readyAgent()
+			w := &testLoginNotifications{err: context.DeadlineExceeded}
+			if scenario == "untrusted" || scenario == "credentials" {
+				u := "https://evil.test/login"
+				if scenario == "credentials" {
+					u = "https://user:secret@login.tailscale.com/login"
+				}
+				w.events = []ipn.Notify{{BrowseToURL: &u}}
+			}
+			err := a.receiveLogin(context.Background(), func(context.Context) (loginNotifications, error) { return w, nil },
+				func(context.Context) error {
+					if scenario == "request-failed" {
+						return errors.New("request failed")
+					}
+					return nil
+				})
+			if err == nil || !w.closed || a.loginURL != "" {
+				t.Fatal("login failure was silently accepted")
+			}
+		})
+	}
+}
 
 func TestLogoutStopsRouteBeforeAccountLogoutAndPreservesGateIdentity(t *testing.T) {
 	a := readyAgent()
 	a.running = true
 	a.publicURL = "https://boundas.example.ts.net/c2c/" + testID
 	a.approvalURL = "https://login.tailscale.com/a/old"
+	a.loginURL = "https://login.tailscale.com/a/old"
 	called := false
 	a.logout = func(context.Context) error {
 		called = true
@@ -36,7 +108,7 @@ func TestLogoutStopsRouteBeforeAccountLogoutAndPreservesGateIdentity(t *testing.
 	if err := json.Unmarshal(out.Body.Bytes(), &reply); err != nil {
 		t.Fatal(err)
 	}
-	if !called || out.Code != 200 || reply.State != "login" || reply.Running || reply.ID != testID || a.approvalURL != "" {
+	if !called || out.Code != 200 || reply.State != "login" || reply.Running || reply.ID != testID || a.approvalURL != "" || a.loginURL != "" {
 		t.Fatal("logout did not safely close own Gate transport")
 	}
 	out = httptest.NewRecorder()
@@ -125,12 +197,16 @@ func TestExpectedURLMismatchDoesNotStopExistingListener(t *testing.T) {
 }
 func TestStartStopAndRestartKeepNodeIdentity(t *testing.T) {
 	a := readyAgent()
+	port, core := gateFixture(t, testID, strings.Repeat("a", 64))
+	defer core.Close()
+	otherPort, otherCore := gateFixture(t, testID, strings.Repeat("b", 64))
+	defer otherCore.Close()
 	call := func(route, body string) *httptest.ResponseRecorder {
 		out := httptest.NewRecorder()
 		a.control(out, httptest.NewRequest("POST", "http://localhost"+route, strings.NewReader(body)))
 		return out
 	}
-	first := call("/start", `{"port":1234}`)
+	first := call("/start", fmt.Sprintf(`{"port":%d}`, port))
 	if first.Code != 200 || !a.running {
 		t.Fatal(first.Body.String())
 	}
@@ -138,7 +214,7 @@ func TestStartStopAndRestartKeepNodeIdentity(t *testing.T) {
 	if call("/stop", `{}`).Code != 200 || a.running {
 		t.Fatal("stop failed")
 	}
-	if call("/start", `{"port":5678}`).Code != 200 || a.publicURL != url {
+	if call("/start", fmt.Sprintf(`{"port":%d}`, otherPort)).Code != 200 || a.publicURL != url {
 		t.Fatal("restart changed URL")
 	}
 	a.stop()
@@ -183,5 +259,52 @@ func TestStatusUsesOnlySafeFields(t *testing.T) {
 	var reply map[string]any
 	if json.Unmarshal(out.Body.Bytes(), &reply) != nil || reply["gatewayID"] != testID || reply["userspace"] != true {
 		t.Fatal("invalid status")
+	}
+}
+
+func TestSignInResumesLoggedOutNodeAfterWatchingAndBeforeInteractiveLogin(t *testing.T) {
+	a := readyAgent()
+	a.statusSource = func(context.Context) (*statusData, error) { return &statusData{state: "Stopped", userspace: true}, nil }
+	u := "https://login.tailscale.com/a/retry"
+	w := &testLoginNotifications{events: []ipn.Notify{{BrowseToURL: &u}}}
+	var calls []string
+	err := a.signIn(context.Background(), func(context.Context) (loginNotifications, error) {
+		calls = append(calls, "watch")
+		return w, nil
+	}, func(context.Context) error { calls = append(calls, "resume"); return nil },
+		func(context.Context) error { calls = append(calls, "login"); return nil })
+	if err != nil || strings.Join(calls, ",") != "watch,resume,login" || a.status(context.Background()).LoginURL != u {
+		t.Fatal("stopped-node login did not resume safely")
+	}
+	a.loginURL = ""
+	called := false
+	err = a.signIn(context.Background(), func(context.Context) (loginNotifications, error) { return w, nil },
+		func(context.Context) error { return errors.New("resume failed") },
+		func(context.Context) error { called = true; return nil })
+	if err == nil || called || a.loginURL != "" {
+		t.Fatal("failed resume continued login")
+	}
+}
+
+func TestLoginFailureReportsReasonAndBackendStateWithoutVPNGuess(t *testing.T) {
+	for _, item := range []struct {
+		err  error
+		code string
+	}{
+		{context.DeadlineExceeded, "login_timeout"}, {errInvalidLoginURL, "login_url_invalid"},
+		{errLoginRejected, "login_rejected"}, {errors.New("secret upstream detail"), "login_failed"},
+	} {
+		a := readyAgent()
+		a.statusSource = func(context.Context) (*statusData, error) { return &statusData{state: "Stopped", userspace: true}, nil }
+		a.login = func(context.Context) error { return item.err }
+		out := httptest.NewRecorder()
+		a.control(out, httptest.NewRequest("POST", "http://localhost/login", nil))
+		var reply struct{ ErrorCode, BackendState, Message string }
+		if err := json.Unmarshal(out.Body.Bytes(), &reply); err != nil {
+			t.Fatal(err)
+		}
+		if out.Code != 409 || reply.ErrorCode != item.code || reply.BackendState != "Stopped" || strings.Contains(reply.Message, "VPN") || strings.Contains(out.Body.String(), "secret") {
+			t.Fatal("login failure is misreported or leaks provider detail")
+		}
 	}
 }

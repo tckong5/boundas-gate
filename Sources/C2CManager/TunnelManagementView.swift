@@ -14,7 +14,7 @@ struct TunnelManagementView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             HStack {
-                Text("Tunnel").font(.title2.weight(.semibold))
+                Text("Advanced Tunnel Details").font(.title2.weight(.semibold))
                 Spacer()
                 Button("完成") { dismiss() }.keyboardShortcut(.cancelAction)
             }

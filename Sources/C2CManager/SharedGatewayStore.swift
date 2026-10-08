@@ -169,6 +169,7 @@ final class SharedGatewayStore: ObservableObject {
     @Published private(set) var operation: String?
     @Published private(set) var restarting = false
     @Published private(set) var checking = false
+    @Published private(set) var checkingInBackground = false
     @Published private(set) var statusConfirmed = false
     @Published private(set) var reconnecting = false
     @Published var message: String?
@@ -176,12 +177,14 @@ final class SharedGatewayStore: ObservableObject {
     private let checker = ConnectionChecker()
     private let gateSourceID: String?
     private var revision = 0
+    private var lastConnectionSummary: String?
     private var reconnectPolicy = GatewayReconnectPolicy()
     private var wakeObserver: AnyCancellable?
 
     var connectionState: GatewayConnectionState {
-        .make(status: statusConfirmed ? status : nil, diagnostics: diagnostics, checking: checking)
+        .make(status: statusConfirmed ? status : nil, diagnostics: diagnostics, checking: visiblyChecking)
     }
+    var visiblyChecking: Bool { checking && !checkingInBackground }
     var usable: Bool { connectionState == .ready }
     var automaticallyReconnects: Bool { status?.reconnectEnabled != false }
     var waitingToReconnect: Bool {
@@ -190,8 +193,8 @@ final class SharedGatewayStore: ObservableObject {
     }
     var connectionTitle: String {
         if reconnecting { return "重新連線中…" }
-        if diagnostics?.hasPublicDNSFailure == true && !checking { return "暫時搵唔到連線地址" }
-        if waitingToReconnect && !checking { return "等待重新連線" }
+        if diagnostics?.hasPublicDNSFailure == true && !visiblyChecking { return "暫時搵唔到連線地址" }
+        if waitingToReconnect && !visiblyChecking { return "等待重新連線" }
         return connectionState.title
     }
     var connectionHint: String {
@@ -214,7 +217,7 @@ final class SharedGatewayStore: ObservableObject {
         if message.contains("地址同原有") || message.contains("固定地址同原有") {
             return "固定地址唔一致，請連返原有 Tailscale 帳戶／裝置。原有設定已保留。"
         }
-        if StableConnectionView.approvalLink(in: message) != nil { return "需要完成 Tailscale 授權，請按下方連結。" }
+        if SecureAccessPresentation.approvalLink(in: message) != nil { return "需要完成 Tailscale 授權，請按下方連結。" }
         if message.contains("Tailscale") && waitingToReconnect {
             return status?.transport == "embedded" ? "內置連線暫時未通，App 會自動再試。" : "請先開啟並連接 Tailscale；App 會自動再試。"
         }
@@ -223,7 +226,7 @@ final class SharedGatewayStore: ObservableObject {
     }
 
     private var publicDNSHint: String {
-        "Mac 暫時搵唔到公開地址。稍後再檢查；如有開 VPN，可暫停後再試。毋須重新登入或下載 Tailscale。"
+        "呢部 Mac 暫時搵唔到 Gate 地址。可按 Secure Access 嘅 Repair 清理網絡快取，再重新檢查。"
     }
 
     init(automaticallyRefresh: Bool = true, gateSourceID: String? = nil) {
@@ -232,7 +235,7 @@ final class SharedGatewayStore: ObservableObject {
         Task { [weak self] in
             while let self {
                 if !self.working {
-                    await self.refresh()
+                    await self.refresh(background: true)
                     if self.statusConfirmed && self.status?.running == true && self.status?.connectionRemembered == false {
                         _ = await self.perform("remember-running")
                     }
@@ -246,17 +249,28 @@ final class SharedGatewayStore: ObservableObject {
                 Task { @MainActor [weak self] in
                     guard let self, !self.working else { return }
                     self.reconnectPolicy.reset()
-                    await self.refresh()
+                    await self.refresh(background: true)
                     await self.recoverIfNeeded()
                 }
             }
     }
 
-    func refresh() async {
-        guard !checking else { return }
+    func refresh(background: Bool = false) async {
+        guard !checking else {
+            // Reuse an ongoing background check when the user clicks refresh,
+            // and keep its visual feedback active until that check finishes.
+            if !background { checkingInBackground = false }
+            return
+        }
         let currentRevision = revision
+        checkingInBackground = background
         checking = true
-        defer { if currentRevision == revision { checking = false } }
+        defer {
+            if currentRevision == revision {
+                checking = false
+                checkingInBackground = false
+            }
+        }
         do {
             let response = try await client.gateway("status", sourceID: gateSourceID)
             let status = try JSONDecoder().decode(GatewayStatus.self, from: response)
@@ -279,6 +293,14 @@ final class SharedGatewayStore: ObservableObject {
                 let checked = await checker.check(workspaceID: id, status: status.bridgeStatus, service: gateSourceID == nil ? "boundas-gateway" : "c2c-bridge")
                 guard currentRevision == revision else { return }
                 diagnostics = checked
+                // Record state transitions, not every background poll. These
+                // checks contain no credentials or file-operation responses.
+                let summary = GatewayDiagnosticsLog.connectionSummary(checked)
+                if summary != lastConnectionSummary {
+                    GatewayDiagnosticsLog.record(.init(code: checked.isUsable ? 0 : 1, output: "", error: summary),
+                                                 action: "connection-check")
+                    lastConnectionSummary = summary
+                }
                 if usable {
                     reconnectPolicy.reset()
                     if !working { message = nil }
@@ -295,17 +317,19 @@ final class SharedGatewayStore: ObservableObject {
     @discardableResult
     func perform(_ action: String, selectedIDs: [String]? = nil, sourceID: String? = nil,
                  workspaceID: String? = nil, codeRequired: Bool? = nil, reconnectEnabled: Bool? = nil,
-                 clientID: String? = nil, confirmedExternal: Bool? = nil) async -> Bool {
+                 clientID: String? = nil, confirmedExternal: Bool? = nil, sessionIDs: [String]? = nil) async -> Bool {
         guard !working else { return false }
         working = true
         operation = action
         revision += 1
         checking = false
+        checkingInBackground = false
         message = nil
         defer { working = false; operation = nil }
         do {
             let input: Data?
-            if let confirmedExternal { input = try JSONEncoder().encode(["confirmedExternal": confirmedExternal]) }
+            if let sessionIDs { input = try JSONEncoder().encode(["sessionIDs": sessionIDs]) }
+            else if let confirmedExternal { input = try JSONEncoder().encode(["confirmedExternal": confirmedExternal]) }
             else if let clientID { input = try JSONEncoder().encode(["clientID": clientID]) }
             else if let reconnectEnabled { input = try JSONEncoder().encode(["enabled": reconnectEnabled]) }
             else if let workspaceID {
@@ -318,17 +342,28 @@ final class SharedGatewayStore: ObservableObject {
             else { input = nil }
             let response = try await client.gateway(action, input: input, sourceID: gateSourceID)
             if action == "pair" { pairing = try JSONDecoder().decode(GatewayPairing.self, from: response) }
-            else if ["configure", "remove-root", "stop", "logout", "revoke"].contains(action) { pairing = nil }
+            else if ["configure", "remove-root", "stop", "logout", "revoke", "cancel-setup"].contains(action) { pairing = nil }
             if action == "folder-code" {
                 let code = try JSONDecoder().decode(GatewayFolderCode.self, from: response)
                 folderCodes[code.workspaceID] = code
             } else if ["code-policy", "lock-folder"].contains(action), let workspaceID {
                 folderCodes[workspaceID] = nil
             } else if ["stop", "logout", "revoke"].contains(action) { folderCodes.removeAll() }
-            let loginSetup = action == "login" ? try JSONDecoder().decode(GatewayStatus.self, from: response).transportSetup : nil
+            let loginSetup = ["login", "prepare-access"].contains(action) ? try JSONDecoder().decode(GatewayStatus.self, from: response).transportSetup : nil
+            // Open the command's URL immediately, before health checks or a
+            // concurrent status refresh can replace this login response.
+            if action == "login" {
+                if let url = loginSetup?.actionURL {
+                    guard NSWorkspace.shared.open(url) else {
+                        throw C2CClientError.commandFailed("未能開啟瀏覽器。請確認已設定預設瀏覽器，再按 Sign In。")
+                    }
+                } else if loginSetup?.state != "ready" {
+                    throw C2CClientError.commandFailed("未能取得 Tailscale 登入網址。請檢查網絡後再按 Sign In。")
+                }
+            }
             await refresh()
             if let loginSetup { status?.transportSetup = loginSetup }
-            if ["start", "reconnect", "recover"].contains(action) {
+            if ["start", "reconnect", "recover"].contains(action), status?.localOnly != true {
                 for _ in 0..<3 where !usable {
                     try await Task.sleep(for: .seconds(3))
                     await refresh()
@@ -345,20 +380,56 @@ final class SharedGatewayStore: ObservableObject {
             }
             return true
         } catch {
-            message = error.localizedDescription
+            let failure = error.localizedDescription
             await refresh()
+            message = failure
             return false
         }
     }
 
     func repair() async {
         guard !working else { return }
+        if status?.running == true, status?.tunnel?.running == true,
+           diagnostics?.hasPublicDNSFailure == true, diagnostics?.address.passed == true {
+            await refresh()
+            if diagnostics?.hasPublicDNSFailure == true { message = publicDNSHint }
+            return
+        }
         guard statusConfirmed, let status, status.state != "unknown", status.running != nil else {
             await refresh()
             return
         }
         reconnectPolicy.reset()
         _ = await perform(status.running == true ? "reconnect" : "start")
+    }
+
+    var canRepairDNSCache: Bool {
+        statusConfirmed && status?.running == true && status?.tunnel?.running == true
+            && diagnostics?.hasPublicDNSFailure == true && diagnostics?.address.passed == true
+    }
+
+    /// Called only after the user confirms the cache repair in the Gate UI.
+    func repairDNSCache() async {
+        guard !working, canRepairDNSCache else { return }
+        working = true
+        operation = "repair-dns"
+        revision += 1
+        // A background observation must not silently swallow a confirmed
+        // Repair click. Invalidate it just as other explicit actions do.
+        checking = false
+        checkingInBackground = false
+        message = nil
+        defer { working = false; operation = nil }
+        let result = await DNSCacheRepair.run()
+        guard result != .cancelled else { return }
+        await refresh()
+        if result == .failed {
+            message = "未能清理網絡快取。請稍後再按 Repair。"
+        } else if result == .busy {
+            message = "另一個 Gate 正在清理網絡快取，請稍後重新檢查。"
+        } else if diagnostics?.hasPublicDNSFailure == true {
+            message = "已清理網絡快取，但仍然搵唔到 Gate 地址。請稍後重新檢查；可能仍有 DNS 或網絡問題。"
+        }
     }
 
     func restart() async {
@@ -368,7 +439,7 @@ final class SharedGatewayStore: ObservableObject {
         if status?.running == true {
             guard await perform("stop") else { return }
         }
-        _ = await perform("start")
+        _ = await perform(status?.localOnly == true ? "start-local" : "reconnect")
     }
 
     func setAutomaticReconnect(_ enabled: Bool) async {
@@ -376,17 +447,17 @@ final class SharedGatewayStore: ObservableObject {
         reconnectPolicy.reset()
     }
 
-    private func recoverIfNeeded() async {
+    func recoverIfNeeded() async {
         guard reconnectPolicy.shouldAttempt(status: status, usable: usable, confirmed: statusConfirmed,
-                                             busy: working || checking) else { return }
+                                             busy: working || checking, diagnostics: diagnostics) else { return }
         reconnecting = true
         defer { reconnecting = false }
         _ = await perform("recover")
     }
 
-    func signInTunnel() async {
-        guard await perform("login") else { return }
-        if let url = status?.transportSetup?.actionURL { NSWorkspace.shared.open(url) }
+    @discardableResult
+    func signInTunnel() async -> Bool {
+        await perform("login")
     }
 
     func copyURL(openChatGPT: Bool = false) {

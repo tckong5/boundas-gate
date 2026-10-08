@@ -4,42 +4,97 @@ struct SharedGatewayView: View {
     @ObservedObject var store: WorkspaceStore
     @ObservedObject var gateway: SharedGatewayStore
     @Binding var selected: Set<String>
-    @State private var confirmRevoke = false
-    @State private var testCopied = false
-    @State private var showPairing = false
-    @State private var setupNotice: String?
-    @State private var expandedOverride: Bool?
     @State private var showAdvanced = false
-    @State private var showTunnelManagement = false
-
-    private var saved: Set<String> { Set((gateway.status?.roots ?? []).map { $0.sourceID.lowercased() }) }
-    private var changed: Bool { selected != saved }
-    private var testPrompt: String {
-        "請用 Boundas Gate 共用連線，先 call list_workspaces，再分別列出每個已授權 Folder 最上層嘅檔案名稱。唔好修改任何檔案。"
-    }
-
     var body: some View {
         ScrollView {
-            connectionControls
+            GateConnectionContent(gateway: gateway, selected: $selected, context: .main, advanced: $showAdvanced, mapStore: store)
                 .padding(.horizontal, 28).padding(.vertical, 20)
         }
         .navigationTitle("Main Gate")
+    }
+}
+
+/// Main and Side Gates render the same journey; only the Gate context/data differ.
+struct GateConnectionContent: View {
+    @ObservedObject var gateway: SharedGatewayStore
+    @Binding var selected: Set<String>
+    @State private var confirmRevoke = false
+    @StateObject private var setup: AISetupStore
+    let context: GateUIContext
+    @State private var setupExpanded = false
+    @State private var confirmTunnelLogout = false
+    @State private var confirmDNSRepair = false
+    @State private var confirmSharedMigration = false
+    @State private var revokeConnection: GatewayAIConnection?
+    @State private var setupNotice: String?
+    @State private var expandedOverride: Bool?
+    @Binding private var showAdvanced: Bool
+    @State private var showTunnelManagement = false
+    @State private var refreshMinimumSpin = false
+    @State private var detailConnectionID: String?
+    private let mapStore: WorkspaceStore?
+
+    init(gateway: SharedGatewayStore, selected: Binding<Set<String>>, context: GateUIContext, advanced: Binding<Bool>, mapStore: WorkspaceStore? = nil) {
+        self.gateway = gateway
+        _selected = selected
+        self.context = context
+        self.mapStore = mapStore
+        _showAdvanced = advanced
+        _setup = StateObject(wrappedValue: AISetupStore(file: context.setupFile()))
+    }
+
+    private var saved: Set<String> { Set((gateway.status?.roots ?? []).map { $0.sourceID.lowercased() }) }
+    private var changed: Bool { !context.isSide && selected != saved }
+    var body: some View {
+        connectionControls
         .sheet(isPresented: $showTunnelManagement) {
             TunnelManagementView(gateway: gateway)
         }
-        .onAppear {
-            showPairing = gateway.status?.tokenCount == 0 || gateway.pairing != nil
+        .onAppear { reconcileSetup() }
+        .onChange(of: gateway.status?.aiConnections) { _, _ in reconcileSetup() }
+        .onChange(of: gateway.status?.gatewayID) { _, _ in reconcileSetup() }
+        .onChange(of: setup.draft?.stage) { _, stage in
+            if stage == .completed { setupExpanded = false }
+            if !context.isSide && (stage == .completed || stage == nil) { expandedOverride = nil }
         }
-        .onChange(of: gateway.status?.tokenCount) { _, count in
-            if count == 0 { showPairing = true }
+        .onChange(of: gateway.status?.pairingActive) { _, _ in reconcileSetup() }
+        .onChange(of: journey.presentationKey) { _, _ in
+            if !setupExpanded { expandedOverride = nil }
         }
-        .onChange(of: journey.presentationKey) { _, _ in expandedOverride = nil }
-        .onChange(of: gateway.pairing?.pairingCode) { _, code in
-            if code != nil { showPairing = true; expandedOverride = true }
+        .confirmationDialog("Repair Secure Access?", isPresented: $confirmDNSRepair) {
+            Button("Refresh Network Cache") { Task { await gateway.repairDNSCache() } }
+        } message: {
+            Text("Clear this Mac's DNS cache, then check this Gate again. macOS may ask for an administrator password.")
         }
-        .confirmationDialog("撤銷全部共用連線授權？", isPresented: $confirmRevoke) {
+        .confirmationDialog("Sign Out of Tailscale?", isPresented: $confirmTunnelLogout) {
+            Button("Sign Out", role: .destructive) {
+                Task { _ = await gateway.perform("logout", confirmedExternal: gateway.status?.transport == "external") }
+            }
+        } message: {
+            Text(gateway.status?.transport == "external"
+                 ? "This stops this Gate and signs this Mac out of Tailscale. Side Gates and other services using this device may also stop. Folders, MCP authorizations and the saved address are preserved."
+                 : gateway.status?.sharedTunnel == true
+                 ? "This signs out shared Secure Access for Main Gate and all Side Gates using it. Folders, MCP authorizations and saved addresses are preserved."
+                 : "This stops this Gate and signs out its secure access. Folders, MCP authorizations and the saved address are preserved. Other Gates are unaffected.")
+        }
+        .confirmationDialog("Use Shared Secure Access?", isPresented: $confirmSharedMigration) {
+            Button("Use Shared Secure Access") { Task { _ = await gateway.perform("migrate-shared") } }
+        } message: {
+            Text("This Side Gate will use Main Gate’s Tailscale sign-in and domain. Its Server URL will change: update the URL in each AI app; the app may require authorization again. Folder permissions and other Gates are preserved.")
+        }
+        .confirmationDialog("Remove MCP Connection?", isPresented: Binding(
+            get: { revokeConnection != nil }, set: { if !$0 { revokeConnection = nil } }
+        )) {
+            if let connection = revokeConnection {
+                Button("Revoke and Remove", role: .destructive) {
+                    Task { _ = await gateway.perform("revoke-client", clientID: connection.clientID) }
+                    revokeConnection = nil
+                }
+            }
+        } message: { Text("This revokes this app’s access, refresh credentials and temporary Folder access for this Gate. Other apps and Gates are unaffected.") }
+        .confirmationDialog("Revoke all \(context.title) authorizations?", isPresented: $confirmRevoke) {
             Button("撤銷授權", role: .destructive) { Task { _ = await gateway.perform("revoke") } }
-        } message: { Text("Main Gate MCP Connections 即時失去授權；Side Gates 不受影響。") }
+        } message: { Text("Only this Gate’s MCP authorizations will be revoked. Other Gates are unaffected.") }
         .alert("下一步", isPresented: Binding(
             get: { setupNotice != nil },
             set: { if !$0 { setupNotice = nil } }
@@ -50,73 +105,91 @@ struct SharedGatewayView: View {
 
     private var journey: GateConnectionJourney {
         .make(status: gateway.status, diagnostics: gateway.diagnostics, confirmed: gateway.statusConfirmed,
-              busy: gateway.working || gateway.checking || gateway.reconnecting, usable: gateway.usable)
+              busy: gateway.working || gateway.visiblyChecking || gateway.reconnecting || refreshMinimumSpin, usable: gateway.usable)
     }
 
     private var opening: Bool {
-        gateway.restarting || gateway.reconnecting || ["start", "reconnect", "recover"].contains(gateway.operation ?? "")
+        gateway.restarting || gateway.reconnecting || ["start-local", "start", "reconnect", "recover"].contains(gateway.operation ?? "")
     }
 
     private var detailsExpanded: Bool {
-        !journey.isReady || opening || (expandedOverride ?? journey.hasAIWarning)
+        if mapEligible { return expandedOverride ?? false }
+        if !context.isSide && mapStore != nil && (setup.draft?.inProgress == true
+            || !setup.completedGateIDs.contains(gateway.status?.gatewayID ?? "")) { return true }
+        return !journey.isReady || opening || setupExpanded || refreshMinimumSpin || (expandedOverride ?? journey.hasAIWarning)
+    }
+
+    private var mapEligible: Bool {
+        !context.isSide && mapStore != nil && journey.isOpen
+            && gateway.status?.aiConnections != nil
+            && setup.completedGateIDs.contains(gateway.status?.gatewayID ?? "")
+            && setup.draft?.inProgress != true
+            && !opening && !setupExpanded && !refreshMinimumSpin
+            && (!gateway.visiblyChecking || ["configure", "remove-root", "code-policy", "lock-folder", "folder-code",
+                                             "revoke", "revoke-client", "remove-client"].contains(gateway.operation ?? ""))
     }
 
     private var gateTitle: String {
-        if gateway.restarting || gateway.reconnecting || ["reconnect", "recover"].contains(gateway.operation ?? "") {
-            return "Reopening Gate…"
-        }
-        if gateway.operation == "start" { return "Opening Gate…" }
-        if journey.isOpen { return "Gate Open" }
-        if gateway.statusConfirmed, gateway.status?.running == false,
-           gateway.status?.stableMCPURL != nil { return "Gate Closed" }
-        if journey.nodes.contains(.attention) { return "Gate Needs Attention" }
-        return "Setup Required"
+        if mapEligible { return "Gate Open" }
+        let title = journey.summaryTitle(opening: gateway.operation == "start-local" || gateway.operation == "start" || gateway.operation == "prepare-access",
+            reopening: gateway.restarting || gateway.reconnecting || ["reconnect", "recover"].contains(gateway.operation ?? ""),
+            closed: gateway.statusConfirmed && gateway.status?.running == false
+                && (gateway.status?.stableMCPURL != nil
+                    || gateway.status?.connectionRemembered == true && gateway.status?.desiredRunning == false))
+        return title == "Finish setting up your Gate" ? context.setupTitle : title
     }
 
     private var summaryDetail: String {
         let folders = gateway.status?.roots.count ?? 0
         let connections = journey.aiConnections.filter(\.isAuthorized).count
-        var text = "\(connections) MCP \(connections == 1 ? "Connection" : "Connections") · \(folders) Folders shared"
-        if journey.attentionCount > 0 { text += " · \(journey.attentionCount) needs attention" }
+        var text = "\(connections) MCP \(connections == 1 ? "Connection" : "Connections")"
+        if !context.isSide { text += " · \(folders) Folders shared" }
+        let attention = mapEligible ? mapAttentionCount : journey.attentionCount
+        if attention > 0 { text += " · \(attention) needs attention" }
         return text
     }
 
+    private var mapAttentionCount: Int {
+        journey.aiConnections.filter { $0.authorizationState != "revoked" && $0.needsAttention }.count
+    }
+
     private var stageExplanation: String? {
-        if changed { return "請先儲存左邊嘅 Folder 分享變更。" }
         switch journey.activeStage {
         case .local:
-            if journey.nodes[0] == .attention { return "Boundas Gate isn't responding on this Mac." }
-            return gateway.status?.running == false ? "Open Boundas Gate on this Mac." : "Checking Boundas Gate on this Mac."
+            if journey.nodes[0] == .attention { return "\(context.localTitle) isn't responding on this Mac." }
+            if gateway.operation == "start-local" { return "Starting the local MCP host…" }
+            return gateway.status?.running == false ? context.localInstruction : "Checking the local MCP host…"
         case .tunnel:
-            if let setup = gateway.status?.transportSetup, setup.state != "ready" {
-                return "Your Gate can't be reached from ChatGPT or Claude yet.\nYour existing setup is preserved."
-            }
-            return journey.nodes[1] == .attention
-                ? "Your Gate can't be reached from ChatGPT or Claude yet.\nYour existing setup is preserved."
-                : "Preparing secure access to your Gate."
+            return nil
         case .aiConnection:
-            if gateway.status?.aiConnections == nil { return "Checking which AI apps can use your Gate." }
-            if journey.aiConnections.isEmpty { return "Connect ChatGPT, Claude, or another MCP-compatible app." }
-            return journey.isReady ? "Some AI apps need attention. Other authorized apps can still use your Gate."
-                : "Set up or renew an AI app's access to your Gate."
+            if setup.draft?.inProgress == true { return nil }
+            return gateway.status?.aiConnections == nil ? "Checking which AI apps can use your Gate."
+                : "Connect ChatGPT, Claude, or another MCP-compatible app."
         case .ready:
             return nil
         }
+    }
+
+    private var aiSetupTitle: String? {
+        guard let draft = setup.draft, draft.inProgress else { return nil }
+        return draft.app == .other ? "Connect an AI App" : "Connect \(draft.app.title)"
     }
 
     private var connectionControls: some View {
         VStack(alignment: .leading, spacing: 20) {
             HStack(alignment: .top, spacing: 12) {
                 Button {
-                    if journey.isReady && !opening { expandedOverride = !detailsExpanded }
+                    if (journey.isReady || mapEligible) && !opening { toggleDetails() }
                 } label: {
                     HStack(alignment: .top, spacing: 12) {
-                        GateJourneyDot(state: journey.isOpen ? .current : opening ? .current
-                                       : journey.nodes.contains(.attention) ? .attention : .pending,
-                                       pulses: !detailsExpanded)
                         VStack(alignment: .leading, spacing: 5) {
                             Text(gateTitle).font(.system(size: 17, weight: .medium))
-                            Text(summaryDetail).font(.callout).foregroundStyle(.secondary)
+                            if journey.showsSummaryCounts || mapEligible {
+                                Text(summaryDetail).font(.callout).foregroundStyle(.secondary)
+                                if context.isSide && journey.isOpen {
+                                    Text(secureAccess.description).font(.callout).foregroundStyle(.secondary)
+                                }
+                            }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
@@ -126,12 +199,17 @@ struct SharedGatewayView: View {
                 .help("Show connection details")
                 Menu {
                     Button(detailsExpanded ? "Hide connection details" : "Show connection details") {
-                        expandedOverride = !detailsExpanded
-                    }.disabled(!journey.isReady || opening)
-                    Button("Set Up MCP Connection") { beginAISetup() }
-                        .disabled(!gateway.usable || gateway.working || gateway.checking || changed )
+                        toggleDetails()
+                    }.disabled(!(journey.isReady || mapEligible) || opening)
+                    if gateway.usable && journey.presentsContent(for: .aiConnection) {
+                        Button(setup.draft?.inProgress == true ? "Continue Setup" : "Connect an AI App") { beginAISetup() }
+                            .disabled(gateway.working || gateway.visiblyChecking)
+                    }
+                    if gateway.statusConfirmed && gateway.status?.running == true {
+                        Button("Close Gate") { Task { _ = await gateway.perform("stop") } }
+                            .disabled(gateway.working || gateway.visiblyChecking || gateway.reconnecting)
+                    }
                     Divider()
-                    Button("Manage Tunnel…") { showTunnelManagement = true }
                     Button("Advanced…") { showAdvanced = true }
                 } label: {
                     Image(systemName: "ellipsis").font(.system(size: 15))
@@ -149,86 +227,162 @@ struct SharedGatewayView: View {
             }
             if detailsExpanded {
                 GateConnectionStepper(journey: journey, explanation: stageExplanation,
-                                      showConnections: journey.activeStage == .aiConnection || expandedOverride == true || showPairing) {
-                    journeyAction
+                                      showConnections: journey.presentsContent(for: .aiConnection),
+                                      aiConnectionTitle: aiSetupTitle, localTitle: context.localTitle) { stage in
+                    if stage == .local && journey.showsLocalCloseControl {
+                        Button("Close Gate") { Task { _ = await gateway.perform("stop") } }
+                            .buttonStyle(.bordered).controlSize(.small)
+                            .disabled(gateway.working || gateway.visiblyChecking || gateway.reconnecting)
+                    } else if journey.presentsPrimaryAction(for: stage) {
+                        if stage == .tunnel { secureAccessAction }
+                        else { journeyAction }
+                    }
+                } labelAccessory: { stage in
+                    if stage == .tunnel { secureAccessRefreshButton }
+                } secondary: { stage in
+                    if stage == .tunnel && journey.presentsSecondaryActions(for: stage)
+                        && (secureAccess.canSignOut || gateway.status?.sharedMigrationAvailable == true || gateway.status?.endpointMigrationPending == true) {
+                        secureAccessMenu
+                    }
                 } connections: {
-                    VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 14) {
                         aiConnectionRows
-                        if gateway.usable { aiAuthorizationControls }
+                        AIConnectionSetupView(gateway: gateway, setup: setup, expanded: $setupExpanded, context: context)
                     }
                 } tunnel: {
-                    tunnelDetails
+                    Text(secureAccessDescription).font(.callout).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .help(gateway.status?.transportSetup?.message ?? gateway.diagnostics?.publicEndpoint.detail ?? "")
                 }
+            } else if mapEligible, let mapStore {
+                LiveGateActivityMap(store: mapStore, gateway: gateway, connectApp: { beginAISetup() })
+                if mapAttentionCount > 0 {
+                    HStack {
+                        Text("Some authorizations need attention.").font(.callout).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Review Connections") { toggleDetails() }.controlSize(.small)
+                    }
+                }
+            } else if let draft = setup.draft, draft.inProgress {
+                HStack {
+                    Text("\(draft.app.title) · Setup in progress").font(.callout).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Continue Setup") { beginAISetup() }.controlSize(.small)
+                }.padding(.leading, 40)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var tunnelDetails: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Button("Manage Tunnel…") { showTunnelManagement = true }
-                .buttonStyle(.borderless).controlSize(.small)
-            if let url = gateway.status?.mcpURL {
-                Text("Server URL").font(.caption).foregroundStyle(.secondary)
-                HStack(alignment: .top, spacing: 8) {
-                    Text(url).font(.system(.caption, design: .monospaced))
-                        .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                    Spacer(minLength: 0)
-                    Button { gateway.copyURL() } label: {
-                        Image(systemName: "doc.on.doc")
-                    }
-                    .buttonStyle(.borderless).help("Copy URL").accessibilityLabel("Copy URL")
-                    .disabled(!gateway.usable)
-                }
+    private var secureAccess: SecureAccessPresentation {
+        .make(status: gateway.status, complete: journey.nodes[1] == .completed, message: gateway.message,
+              diagnostics: gateway.diagnostics, isSideGate: context.isSide)
+    }
+
+    private var secureAccessChecking: Bool {
+        refreshMinimumSpin || gateway.visiblyChecking || journey.nodes[1] == .current
+    }
+
+    private var secureAccessDescription: String {
+        if secureAccessChecking {
+            if gateway.operation == "login" {
+                return context.isSide ? "Authorizing / checking secure access…" : "Signing in / checking secure access…"
+            }
+            return "Checking secure access…"
+        }
+        return secureAccess.description
+    }
+
+    @ViewBuilder
+    private var secureAccessAction: some View {
+        if let action = secureAccess.action, action != .recheck {
+            Button(secureAccess.button) { Task { await handleSecureAccess(action) } }
+                .buttonStyle(.borderedProminent).controlSize(.small)
+                .disabled(gateway.working || gateway.visiblyChecking || gateway.reconnecting || refreshMinimumSpin)
+        }
+    }
+
+    private var secureAccessRefreshButton: some View {
+        let spinning = secureAccessChecking
+        return Button {
+            refreshMinimumSpin = true
+            Task {
+                // Keep visual feedback for at least three seconds without
+                // delaying the actual status result or other Gate actions.
+                async let minimumSpin: Void = Task.sleep(for: .seconds(3))
+                await gateway.refresh()
+                _ = try? await minimumSpin
+                refreshMinimumSpin = false
+            }
+        } label: {
+            SecureAccessRefreshIcon(spinning: spinning)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).foregroundStyle(.secondary)
+        .disabled(gateway.working || spinning || gateway.reconnecting)
+        .help("Recheck Secure Access").accessibilityLabel("Recheck Secure Access")
+    }
+
+    private var secureAccessMenu: some View {
+        Menu {
+            if gateway.status?.sharedMigrationAvailable == true || gateway.status?.endpointMigrationPending == true {
+                Button(gateway.status?.endpointMigrationPending == true ? "Retry Shared Secure Access Migration…" : "Use Shared Secure Access…") { confirmSharedMigration = true }
+                    .disabled(gateway.working)
+            }
+            if secureAccess.canSignOut {
+                Button("Sign Out of Tailscale…") { confirmTunnelLogout = true }
+                    .disabled(gateway.working || gateway.status?.gatewayID == nil)
+            }
+        } label: { Image(systemName: "ellipsis").frame(width: 24, height: 24) }
+            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help("Secure Access actions")
+    }
+
+    private func handleSecureAccess(_ action: SecureAccessPresentation.Action) async {
+        switch action {
+        case .setUp:
+            _ = await gateway.perform("prepare-access")
+        case .signIn:
+            guard await gateway.perform("prepare-access") else {
+                setupNotice = gateway.message ?? "未能準備登入，請稍後再試。"
+                return
+            }
+            if !(await gateway.signInTunnel()) {
+                setupNotice = gateway.message ?? "未能開啟登入頁面，請稍後再試。"
+            }
+        case .approve:
+            let approvalURL = secureAccess.approvalURL
+            guard await gateway.perform("prepare-access") else { return }
+            if let url = secureAccess.approvalURL ?? approvalURL { NSWorkspace.shared.open(url) }
+        case .repair:
+            if gateway.status?.localOnly == true { _ = await gateway.perform("prepare-access") }
+            else { await gateway.repair() }
+        case .repairDNS:
+            confirmDNSRepair = true
+        case .recheck:
+            await gateway.refresh()
+        }
+    }
+
+    private func openTailscale() {
+        for id in ["io.tailscale.ipn.macos", "io.tailscale.ipn.macsys"] {
+            if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) {
+                NSWorkspace.shared.openApplication(at: url, configuration: .init()); return
             }
         }
     }
 
-    private var aiAuthorizationControls: some View {
-        DisclosureGroup("配對／授權", isExpanded: $showPairing) {
-            VStack(alignment: .leading, spacing: 12) {
-                if let pairing = gateway.pairing {
-                    TimelineView(.periodic(from: .now, by: 1)) { context in
-                        let remaining = max(0, Int(ceil(pairing.expiration.timeIntervalSince(context.date))))
-                        if remaining > 0 {
-                            HStack(spacing: 16) {
-                                Text(pairing.pairingCode)
-                                    .font(.system(.title, design: .monospaced).bold()).textSelection(.enabled)
-                                Button("複製") { gateway.copy(pairing.pairingCode) }
-                            }
-                            Text("目前分享：\((gateway.status?.roots.map(\.name) ?? pairing.roots.map(\.name)).joined(separator: "、"))")
-                                .font(.callout)
-                            Text(gateway.status?.authorizationVersion == 2
-                                 ? "此配對連接 Boundas Gate；之後確認分享嘅 Folders 亦可讀取。"
-                                 : "請先套用新版授權，新增分享嘅 Folders 先會自動生效。")
-                                .font(.caption).foregroundStyle(.secondary)
-                            Text("\(remaining / 60):\(String(format: "%02d", remaining % 60)) 後過期")
-                                .font(.caption).foregroundStyle(.secondary)
-                        } else {
-                            Text("配對碼已過期，請重新產生。").foregroundStyle(.orange)
-                        }
-                    }
-                }
-                HStack {
-                    Button(gateway.pairing == nil ? "產生配對碼" : "重新產生") {
-                        Task { _ = await gateway.perform("pair") }
-                    }
-                    .disabled(gateway.working || changed )
-                    if gateway.status?.addressConfirmed != true {
-                        Button("已完成設定") { Task { _ = await gateway.perform("confirm") } }
-                            .disabled(gateway.working)
-                    }
-                }
-                Button(testCopied ? "已複製 · 再複製測試句子" : "複製測試句子") {
-                    gateway.copy(testPrompt); testCopied = true
-                }
-                DisclosureGroup("管理授權") {
-                    Button("撤銷全部授權…", role: .destructive) { confirmRevoke = true }
-                        .disabled(gateway.working).padding(.top, 8)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 8)
-        }
+    private func toggleDetails() {
+        let expand = !detailsExpanded
+        if !expand { setupExpanded = false }
+        expandedOverride = expand
+    }
+
+    private func reconcileSetup() {
+        guard gateway.statusConfirmed else { return }
+        // Record an actual successful authorization once, including authorizations created before this UI version.
+        if !context.isSide { setup.observeAuthorization(gateID: gateway.status?.gatewayID, connections: gateway.status?.aiConnections) }
+        setup.reconcile(gateID: gateway.status?.gatewayID, connections: gateway.status?.aiConnections,
+                        pairingActive: gateway.status?.pairingActive)
     }
 
     private var aiConnectionRows: some View {
@@ -238,17 +392,33 @@ struct SharedGatewayView: View {
                     VStack(spacing: 8) {
                         ForEach(journey.aiConnections) { connection in
                             HStack(spacing: 8) {
-                                GateJourneyDot(state: connection.isAuthorized ? .completed : connection.needsAttention ? .attention : .pending, pulses: false)
+                                GateJourneyDot(state: connection.isAuthorized ? .completed : connection.needsAttention ? .attention : .pending,
+                                               pulses: false, completedColor: .blue)
                                     .frame(width: 16, height: 24)
                                 Text(connection.name).font(.callout).lineLimit(1).help(connection.name)
-                                Spacer(minLength: 8)
                                 Text(connection.statusLabel).font(.caption)
                                     .foregroundStyle(connection.needsAttention ? Color.orange : Color.secondary)
                                     .help(connection.reason ?? "Authorization status is unknown.")
+                                Spacer(minLength: 8)
+                                Menu {
+                                    Button("Connection Details…") { detailConnectionID = connection.id }
+                                    if connection.isAuthorized {
+                                        Button("Revoke and Remove…", role: .destructive) { revokeConnection = connection }
+                                            .disabled(gateway.working || gateway.status?.clientRevocationVersion != 1)
+                                    }
+                                } label: { Image(systemName: "ellipsis").frame(width: 24, height: 24) }
+                                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                                .help("Connection actions")
+                                .popover(isPresented: Binding(
+                                    get: { detailConnectionID == connection.id },
+                                    set: { if !$0 && detailConnectionID == connection.id { detailConnectionID = nil } }
+                                ), arrowEdge: .trailing) {
+                                    connectionDetails(connection)
+                                }
                                 if !connection.isAuthorized {
                                     Button(connection.needsAttention ? "Fix" : "Set Up") { beginAISetup(connection) }
                                         .controlSize(.small)
-                                        .disabled(!gateway.usable || gateway.working || gateway.checking || changed )
+                                        .disabled(!gateway.usable || gateway.working || gateway.visiblyChecking)
                                     Button {
                                         Task { _ = await gateway.perform("remove-client", clientID: connection.clientID) }
                                     } label: {
@@ -260,61 +430,60 @@ struct SharedGatewayView: View {
                                     .disabled(gateway.working || gateway.status?.clientManagementVersion != 1)
                                 }
                             }
-                            .help("Client: \(connection.clientID). Status reflects authorization, not live app health.")
+                            .help("Client: \(connection.clientID)")
                         }
                     }
                 }
                 .frame(height: min(180, CGFloat(journey.aiConnections.count) * 32))
-                Text("Status reflects authorization.").font(.caption2).foregroundStyle(.secondary)
             }
         }
+    }
+
+    private func connectionDetails(_ connection: GatewayAIConnection) -> some View {
+        let serverURL = gateway.status?.mcpURL ?? gateway.status?.stableMCPURL
+        return VStack(alignment: .leading, spacing: 14) {
+            Text("Connection Details").font(.headline)
+            Text(connection.name).font(.callout).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Server URL").font(.caption).foregroundStyle(.secondary)
+                HStack(alignment: .top, spacing: 12) {
+                    Text(serverURL ?? "Available when Secure Access is ready.")
+                        .font(.system(.callout, design: .monospaced))
+                        .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Button { if let serverURL { gateway.copy(serverURL) } } label: {
+                        Image(systemName: "doc.on.doc").frame(width: 24, height: 24)
+                    }
+                    .buttonStyle(.borderless).foregroundStyle(.secondary)
+                    .help("Copy Server URL").accessibilityLabel("Copy Server URL")
+                    .disabled(serverURL == nil)
+                }
+            }
+        }
+        .padding(18).frame(width: 420)
     }
 
     @ViewBuilder
     private var journeyAction: some View {
-        if !journey.isReady {
-            if journey.activeStage == .aiConnection {
-                if gateway.status?.aiConnections == nil {
-                    Button("Recheck") { Task { await gateway.refresh() } }
-                        .disabled(gateway.working || gateway.checking)
-                } else if journey.aiConnections.isEmpty {
-                    Button("Set Up") { beginAISetup() }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(gateway.working || gateway.checking || changed )
-                }
-            } else if journey.activeStage == .ready {
-                if gateway.statusConfirmed {
-                    Button("Recheck") { Task { await gateway.refresh() } }
-                        .disabled(gateway.working || gateway.checking)
-                }
-            } else if let setup = gateway.status?.transportSetup, setup.state != "ready", let url = setup.actionURL {
-                Link("Continue Setup", destination: url).buttonStyle(.borderedProminent)
-                    .disabled(gateway.working || gateway.checking)
-            } else if let message = gateway.message, let url = StableConnectionView.approvalLink(in: message) {
-                Link("Continue Setup", destination: url).buttonStyle(.borderedProminent)
-                    .disabled(gateway.working || gateway.checking)
-            } else {
-                Button(journey.nodes[journey.activeStage.rawValue] == .attention ? "Repair" : "Continue Setup") {
-                    Task {
-                        if journey.activeStage == .tunnel, gateway.status?.transport == "embedded",
-                           gateway.status?.transportSetup?.state != "ready", !changed {
-                            showTunnelManagement = true
-                        } else { await runPrimaryAction() }
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(gateway.working || gateway.checking)
-            }
+        if journey.activeStage == .local {
+            Button(journey.nodes[0] == .attention ? "Repair" : "Open Gate") {
+                Task { await runPrimaryAction() }
+            }.buttonStyle(.borderedProminent).controlSize(.small)
+                .disabled(gateway.working || gateway.visiblyChecking || gateway.reconnecting)
+        } else if journey.activeStage == .ready && !journey.isReady {
+            Button("Recheck") { Task { await gateway.refresh() } }.disabled(gateway.working || gateway.visiblyChecking)
+        } else if journey.activeStage == .aiConnection && gateway.status?.aiConnections == nil {
+            Button("Recheck") { Task { await gateway.refresh() } }.disabled(gateway.working || gateway.visiblyChecking)
         }
     }
 
     private func beginAISetup(_ connection: GatewayAIConnection? = nil) {
-        showPairing = true
         expandedOverride = true
-        let opensChatGPT = connection == nil || connection?.name.localizedCaseInsensitiveContains("ChatGPT") == true
-        gateway.copyURL(openChatGPT: opensChatGPT)
-        if let connection, !opensChatGPT {
-            setupNotice = "已複製連線地址。請喺 \(connection.name) 重新授權；配對碼可以喺 MCP Connection 產生。"
+        setupExpanded = true
+        if let connection, setup.draft?.inProgress != true, let id = gateway.status?.gatewayID {
+            let app: AISetupDraft.App = connection.name.localizedCaseInsensitiveContains("ChatGPT") ? .chatGPT
+                : connection.name.localizedCaseInsensitiveContains("Claude") ? .claude : .other
+            _ = setup.begin(app, gateID: id)
         }
     }
 
@@ -324,13 +493,13 @@ struct SharedGatewayView: View {
                 if gateway.statusConfirmed && (gateway.status?.running == true || gateway.status?.desiredRunning == true) {
                     if gateway.status?.running == true && gateway.status?.state != "unknown" {
                         Button("Restart") { Task { await gateway.restart() } }
-                            .disabled(gateway.working || gateway.checking || changed)
+                            .disabled(gateway.working || gateway.visiblyChecking || changed)
                     }
-                    Button("Stop") { Task { _ = await gateway.perform("stop") } }
+                    Button("Close Gate") { Task { _ = await gateway.perform("stop") } }
                         .disabled(gateway.working)
                 }
                 Button("Recheck") { Task { await gateway.refresh() } }
-                    .disabled(gateway.working || gateway.checking)
+                    .disabled(gateway.working || gateway.visiblyChecking)
             }
             .controlSize(.small)
             Toggle("斷線後自動恢復", isOn: Binding(
@@ -339,7 +508,14 @@ struct SharedGatewayView: View {
             ))
             .toggleStyle(.checkbox)
             .disabled(gateway.working || !gateway.statusConfirmed )
-            .help("App 運行時自動恢復已開啟嘅共用連線；手動停止後唔會自行開啟。")
+            .help("App 運行時自動恢復已開啟嘅Gate；手動停止後唔會自行開啟。")
+            if gateway.status?.transport != "cloudflare" {
+                Button("Advanced Tunnel Details…") { showTunnelManagement = true }
+            }
+            DisclosureGroup("MCP authorization management") {
+                Button("Revoke all \(context.title) authorizations…", role: .destructive) { confirmRevoke = true }
+                    .disabled(gateway.working)
+            }
             Text(gateway.connectionTitle)
             if gateway.status?.transport == "external" { Text("沿用原有 Tailscale 連線及地址。") }
             if gateway.status?.transport == "embedded", let setup = gateway.status?.transportSetup,
@@ -352,8 +528,8 @@ struct SharedGatewayView: View {
             if !gateway.connectionHint.isEmpty { Text(gateway.connectionHint) }
             if gateway.statusConfirmed && gateway.status?.running == true && gateway.status?.authorizationVersion != 2 {
                 Button("套用新版授權") { Task { await gateway.restart() } }
-                    .disabled(gateway.working || gateway.checking || changed)
-                    .help("重啟共用服務，保留原有 MCP 授權同固定地址。")
+                    .disabled(gateway.working || gateway.visiblyChecking || changed)
+                    .help("重啟此 Gate，保留原有 MCP 授權同固定地址。")
             }
             if gateway.message != nil, gateway.userFacingMessage != gateway.connectionHint {
                 Text(gateway.userFacingMessage ?? "").foregroundStyle(.orange)
@@ -378,16 +554,39 @@ struct SharedGatewayView: View {
                     return
                 }
             }
-            await gateway.repair()
-            if !gateway.usable {
-                showTunnelManagement = true
-            } else if gateway.status?.tokenCount == 0 {
-                showPairing = true
-                setupNotice = "Gate 已開啟。下一步喺 MCP Connection 產生配對碼，再去 AI app 加入連線。"
-            }
+            if journey.activeStage == .local {
+                _ = await gateway.perform("start-local")
+            } else { await gateway.repair() }
+            expandedOverride = true
         case .ready:
-            gateway.copyURL(openChatGPT: true)
+            beginAISetup()
         }
     }
 
+}
+
+private struct SecureAccessRefreshIcon: View {
+    let spinning: Bool
+    @State private var rotation = 0.0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        Image(systemName: "arrow.triangle.2.circlepath")
+            .font(.system(size: 12, weight: .medium))
+            .rotationEffect(.degrees(rotation))
+            .frame(width: 24, height: 24)
+            .onChange(of: spinning, initial: true) { _, _ in updateRotation() }
+            .onChange(of: reduceMotion) { _, _ in updateRotation() }
+    }
+
+    private func updateRotation() {
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) { rotation = 0 }
+        if spinning && !reduceMotion {
+            withAnimation(.linear(duration: 1.2).repeatForever(autoreverses: false)) {
+                rotation = 360
+            }
+        }
+    }
 }

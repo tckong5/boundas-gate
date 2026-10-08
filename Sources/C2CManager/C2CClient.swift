@@ -26,6 +26,7 @@ enum C2CClientError: LocalizedError {
 protocol SideGateClient {
     func status(for workspace: WorkspaceRecord) async throws -> WorkspaceStatus
     func start(_ workspace: WorkspaceRecord) async throws -> StartResult
+    func reconnect(_ workspace: WorkspaceRecord) async throws -> StartResult
     func stop(_ workspace: WorkspaceRecord) async throws
     func pair(_ workspace: WorkspaceRecord) async throws -> PairingCode
     func unpair(_ workspace: WorkspaceRecord) async throws
@@ -119,7 +120,15 @@ struct C2CClient: SideGateClient {
     }
 
     func start(_ workspace: WorkspaceRecord) async throws -> StartResult {
-        let result = try await sideLifecycle("start", workspace)
+        try await launch(workspace, action: "start-local")
+    }
+
+    func reconnect(_ workspace: WorkspaceRecord) async throws -> StartResult {
+        try await launch(workspace, action: "reconnect")
+    }
+
+    private func launch(_ workspace: WorkspaceRecord, action: String) async throws -> StartResult {
+        let result = try await sideLifecycle(action, workspace)
         guard let data = result.output.data(using: .utf8),
               let response = try? JSONDecoder().decode(StartResult.self, from: data) else {
             throw C2CClientError.commandFailed(result.error.isEmpty ? result.output : result.error)

@@ -1,6 +1,6 @@
 import SwiftUI
 
-struct MainGateFolderPasscodeButton: View {
+struct FolderPasscodeButton: View {
     @ObservedObject var gateway: SharedGatewayStore
     let workspace: WorkspaceRecord
     let configurationChanged: Bool
@@ -72,21 +72,21 @@ struct MainGateFolderPasscodeButton: View {
 
             if root == nil || configurationChanged {
                 Text(root == nil
-                     ? "先開啟此 Folder 嘅 Main Gate toggle 並儲存變更，再設定通行碼。"
-                     : "請先儲存左邊嘅 Folder 分享變更。")
+                     ? "先將呢個 Folder 加入此 Gate，並儲存分享變更，再設定通行碼。"
+                     : "請先儲存 Folder 分享變更。")
                     .font(.caption).foregroundStyle(.secondary)
             }
             if legacyConnection {
-                Text("重新開啟共用連線，即可套用通行碼功能。")
+                Text("重新開啟Gate，即可套用通行碼功能。")
                     .font(.caption).foregroundStyle(.secondary)
-                Button("更新共用連線") { Task { await gateway.restart() } }
+                Button("更新Gate") { Task { await gateway.restart() } }
                     .disabled(gateway.working || configurationChanged)
             }
 
             if required, let root {
                 protectionDetails(root)
                 if gateway.status?.running == false {
-                    Text("先開啟共用連線，再產生通行碼。")
+                    Text("先開啟Gate，再產生通行碼。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }

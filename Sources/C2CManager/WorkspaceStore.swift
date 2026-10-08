@@ -14,11 +14,10 @@ final class WorkspaceStore: ObservableObject {
     @Published var selectedID: UUID? = SharedGatewayStore.selectionID
     @Published var alertMessage: String?
     @Published var showingAddPath = false
-    @Published var guidedWorkspaceID: UUID?
-    @Published var stableWorkspaceID: UUID?
 
     private let client: any SideGateClient
     private let checker = ConnectionChecker()
+    private var sideGateConnections: [UUID: SharedGatewayStore] = [:]
     private var checkTasks: [UUID: Task<ConnectionDiagnostics, Never>] = [:]
     private var checkTokens: [UUID: UUID] = [:]
     private var revisions: [UUID: Int] = [:]
@@ -67,9 +66,29 @@ final class WorkspaceStore: ObservableObject {
         guard automaticallyRefresh else { return }
         Task { [weak self] in
             while let self {
+                await self.refreshSideGateJourneys()
                 await self.refreshAll()
                 try? await Task.sleep(for: .seconds(8))
             }
+        }
+    }
+
+    // One observation/reconnect policy per Gate, shared with its detail view.
+    // Monitoring runs even when the user is looking at Main Gate.
+    func sideGateway(for workspace: WorkspaceRecord) -> SharedGatewayStore {
+        if let existing = sideGateConnections[workspace.id] { return existing }
+        let gateway = SharedGatewayStore(automaticallyRefresh: false, gateSourceID: workspace.id.uuidString.lowercased())
+        sideGateConnections[workspace.id] = gateway
+        return gateway
+    }
+
+    private func refreshSideGateJourneys() async {
+        for workspace in sideGateWorkspaces where workspace.canOperateSideGate && busy[workspace.id] == nil {
+            let connection = sideGateway(for: workspace)
+            guard !connection.working else { continue }
+            await connection.refresh(background: true)
+            guard operableSideGate(workspace) != nil, busy[workspace.id] == nil else { continue }
+            await connection.recoverIfNeeded()
         }
     }
 
@@ -95,42 +114,120 @@ final class WorkspaceStore: ObservableObject {
             alertMessage = "請輸入以 / 或 ~/ 開頭嘅 folder 路徑。"
             return false
         }
-        let canonical = URL(fileURLWithPath: expanded, isDirectory: true)
-            .resolvingSymlinksInPath().standardizedFileURL
+        // Match the Gateway's filesystem realpath, including macOS /private aliases.
+        // URL standardization can shorten /private/tmp back to /tmp after resolution.
+        guard let resolved = realpath(expanded, nil) else {
+            alertMessage = "搵唔到呢個 folder：\(trimmed)"
+            return false
+        }
+        let canonicalPath = String(cString: resolved)
+        free(resolved)
+        let canonical = URL(fileURLWithPath: canonicalPath, isDirectory: true)
         var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: canonical.path, isDirectory: &isDirectory),
+        guard FileManager.default.fileExists(atPath: canonicalPath, isDirectory: &isDirectory),
               isDirectory.boolValue else {
             alertMessage = "搵唔到呢個 folder：\(trimmed)"
             return false
         }
-        if let existing = workspaces.first(where: { $0.path == canonical.path }) {
+        if let existing = workspaces.first(where: { $0.path == canonicalPath }) {
             if selectedID != SharedGatewayStore.selectionID {
                 guard existing.sideGateRemovalState == nil else {
                     alertMessage = "請先 Retry 完成 Remove Side Gate，再重新加入。"
                     return false
                 }
                 if let index = workspaces.firstIndex(where: { $0.id == existing.id }) {
+                    let original = workspaces[index]
+                    if !existing.belongsToSideGates { workspaces[index].sideGateOrder = nextFolderOrder(side: true) }
                     workspaces[index].sideGateAdded = true
-                    save()
+                    guard save() else { workspaces[index] = original; return false }
                 }
                 selectedID = existing.id
+            } else if let index = workspaces.firstIndex(where: { $0.id == existing.id }), !existing.belongsToMainGate {
+                let original = workspaces[index]
+                workspaces[index].mainGateOrder = nextFolderOrder(side: false)
+                workspaces[index].mainGateAdded = true
+                guard save() else { workspaces[index] = original; return false }
             }
             return true
         }
 
-        let digest = SHA256.hash(data: Data(canonical.path.lowercased().utf8))
+        let digest = SHA256.hash(data: Data(canonicalPath.lowercased().utf8))
         let c2cID = digest.map { String(format: "%02x", $0) }.joined().prefix(12)
         let folderName = canonical.lastPathComponent
         let displayName = workspaces.contains(where: { $0.name == folderName })
             ? "\(folderName) · \(canonical.deletingLastPathComponent().lastPathComponent)"
             : folderName
-        var record = WorkspaceRecord(name: displayName, path: canonical.path, c2cID: String(c2cID))
-        record.sideGateAdded = selectedID != SharedGatewayStore.selectionID
+        var record = WorkspaceRecord(name: displayName, path: canonicalPath, c2cID: String(c2cID))
+        let side = selectedID != SharedGatewayStore.selectionID
+        record.mainGateAdded = !side
+        record.sideGateAdded = side
+        if side { record.sideGateOrder = nextFolderOrder(side: true) }
+        else { record.mainGateOrder = nextFolderOrder(side: false) }
         workspaces.append(record)
-        if selectedID != SharedGatewayStore.selectionID { selectedID = record.id }
-        save()
+        guard save() else { workspaces.removeLast(); return false }
+        if side { selectedID = record.id }
         Task { await refresh(record) }
         return true
+    }
+
+    private func nextFolderOrder(side: Bool) -> Int {
+        let orders = workspaces.enumerated()
+            .filter { side ? $0.element.belongsToSideGates : $0.element.belongsToMainGate }
+            .map { (side ? $0.element.sideGateOrder : $0.element.mainGateOrder) ?? $0.offset }
+        return (orders.max() ?? -1) + 1
+    }
+
+    @discardableResult
+    func addToSideGates(_ workspace: WorkspaceRecord) -> Bool {
+        guard let index = workspaces.firstIndex(where: { $0.id == workspace.id }),
+              workspaces[index].sideGateRemovalState == nil, busy[workspace.id] == nil else { return false }
+        guard !workspaces[index].belongsToSideGates else { return true }
+        let original = workspaces[index]
+        workspaces[index].sideGateOrder = nextFolderOrder(side: true)
+        workspaces[index].sideGateAdded = true
+        guard save() else { workspaces[index] = original; return false }
+        return true
+    }
+
+    @discardableResult
+    func moveToSideGates(_ workspace: WorkspaceRecord,
+                         revokeMainAccess: ((String) async -> Bool)? = nil) async -> Bool {
+        guard let current = workspaces.first(where: { $0.id == workspace.id && $0.belongsToMainGate }),
+              current.sideGateRemovalState == nil, busy[workspace.id] == nil else { return false }
+        busy[workspace.id] = .move
+        defer { busy[workspace.id] = nil }
+        let sourceID = workspace.id.uuidString.lowercased()
+        let revoked: Bool
+        if let revokeMainAccess { revoked = await revokeMainAccess(sourceID) }
+        else { revoked = await gateway.perform("remove-root", sourceID: sourceID) }
+        guard revoked else {
+            alertMessage = gateway.message ?? "未能停止 Main Gate 分享，Folder 未有搬移。請稍後再試。"
+            return false
+        }
+        guard let index = workspaces.firstIndex(where: { $0.id == workspace.id }),
+              workspaces[index].sideGateRemovalState == nil else { return false }
+        let original = workspaces[index]
+        if !original.belongsToSideGates { workspaces[index].sideGateOrder = nextFolderOrder(side: true) }
+        workspaces[index].sideGateAdded = true
+        workspaces[index].mainGateAdded = false
+        guard save() else { workspaces[index] = original; return false }
+        return true
+    }
+
+    func toggleSideGate(_ workspace: WorkspaceRecord) async {
+        guard let current = operableSideGate(workspace), busy[workspace.id] == nil else { return }
+        let connection = sideGateway(for: current)
+        guard connection.statusConfirmed, let running = connection.status?.running,
+              connection.status?.state != "unknown", !connection.working, !connection.reconnecting else { return }
+        let action = running ? "stop" : "start-local"
+        if !running, !FileManager.default.fileExists(atPath: current.path) {
+            alertMessage = "搵唔到呢個 Folder：\(current.path)"
+            return
+        }
+        busy[current.id] = running ? .stop : .start
+        defer { busy[current.id] = nil }
+        if !(await connection.perform(action)) { alertMessage = connection.message }
+        await refresh(current)
     }
 
     func rename(_ workspace: WorkspaceRecord, to name: String) {
@@ -241,19 +338,11 @@ final class WorkspaceStore: ObservableObject {
         invalidateConnection(workspace)
         defer { busy[workspace.id] = nil }
         do {
-            let result = try await client.start(workspace)
+            _ = try await client.start(workspace)
             await refresh(workspace, forceConnectionCheck: true)
-            if result.mcpUrl != nil && diagnostics[workspace.id]?.isUsable == true && statuses[workspace.id]?.tokenCount == 0 {
-                do {
-                    pairingCodes[workspace.id] = try await client.pair(workspace)
-                    await refresh(workspace)
-                } catch {
-                    if reportErrors { alertMessage = "\(workspace.name) 已啟動，但未能產生配對碼。請喺連線引導再試一次。" }
-                }
-            }
         } catch {
             await refresh(workspace)
-            if reportErrors { alertMessage = "\(workspace.name) 連線未能開啟。請用「幫我修復連線」引導重試。" }
+            if reportErrors { alertMessage = "\(workspace.name) 連線未能開啟。請喺 Gate setup 重試。" }
         }
     }
 
@@ -282,19 +371,11 @@ final class WorkspaceStore: ObservableObject {
             try await client.stop(workspace)
             try await waitForStop(workspace)
             pairingCodes[workspace.id] = nil
-            let result = try await client.start(workspace)
+            _ = try await client.start(workspace)
             await refresh(workspace, forceConnectionCheck: true)
-            if result.mcpUrl != nil && diagnostics[workspace.id]?.isUsable == true && statuses[workspace.id]?.tokenCount == 0 {
-                do {
-                    pairingCodes[workspace.id] = try await client.pair(workspace)
-                    await refresh(workspace)
-                } catch {
-                    if reportErrors { alertMessage = "\(workspace.name) 已重新啟動，但未能產生配對碼。請喺連線引導再試一次。" }
-                }
-            }
         } catch {
             await refresh(workspace)
-            if reportErrors { alertMessage = "\(workspace.name) 連線未能修復。請喺修復引導重新檢查，或複製求助資料。" }
+            if reportErrors { alertMessage = "\(workspace.name) 連線未能修復。請喺 Gate setup 重新檢查。" }
         }
     }
 
@@ -304,62 +385,6 @@ final class WorkspaceStore: ObservableObject {
             try await Task.sleep(for: .milliseconds(250))
         }
         throw C2CClientError.commandFailed("現有連線未完全停止，請稍後再試。")
-    }
-
-    func enableStableConnection(_ workspace: WorkspaceRecord) async -> String? {
-        guard busy[workspace.id] == nil,
-              operableSideGate(workspace) != nil else { return "Side Gate 未啟用，或者正在移除。" }
-        busy[workspace.id] = .restart
-        invalidateConnection(workspace)
-        defer { busy[workspace.id] = nil }
-        do {
-            let setup = try await client.tailscaleSetup()
-            guard setup.ready else { return setup.message }
-            try await client.stop(workspace)
-            try await waitForStop(workspace)
-            guard let index = workspaces.firstIndex(where: { $0.id == workspace.id }) else { return "Folder 已移除。" }
-            workspaces[index].connectionProvider = .tailscale
-            let updatedWorkspace = workspaces[index]
-            save()
-            pairingCodes[workspace.id] = nil
-            _ = try await client.start(updatedWorkspace)
-            await refresh(updatedWorkspace, forceConnectionCheck: true)
-            for _ in 0..<3 where diagnostics[workspace.id]?.isUsable != true {
-                try await Task.sleep(for: .seconds(3))
-                await refresh(updatedWorkspace, forceConnectionCheck: true)
-            }
-            guard diagnostics[workspace.id]?.isUsable == true else {
-                return "固定地址已設定，但公開連線未通過檢查。請確認 Tailscale 已連線，再用修復引導重試。"
-            }
-            return nil
-        } catch {
-            await refresh(workspace)
-            return error.localizedDescription
-        }
-    }
-
-    func openTailscale() {
-        let url = URL(fileURLWithPath: "/Applications/Tailscale.app")
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            NSWorkspace.shared.open(URL(string: "https://tailscale.com/download/mac")!)
-            return
-        }
-        NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
-    }
-
-    func repairConnection(_ workspace: WorkspaceRecord) async -> Bool {
-        guard operableSideGate(workspace) != nil, busy[workspace.id] == nil else { return false }
-        if statuses[workspace.id]?.running == true {
-            await restart(workspace, reportErrors: false)
-        } else {
-            await start(workspace, reportErrors: false)
-        }
-        // A newly created tunnel can need a few seconds before its address responds.
-        for _ in 0..<3 where diagnostics[workspace.id]?.isUsable != true && statuses[workspace.id]?.running == true {
-            do { try await Task.sleep(for: .seconds(3)) } catch { return false }
-            await diagnoseConnection(workspace)
-        }
-        return diagnostics[workspace.id]?.isUsable == true
     }
 
     func generatePairingCode(_ workspace: WorkspaceRecord) async {
@@ -393,7 +418,17 @@ final class WorkspaceStore: ObservableObject {
 
     func reconnectAll() async {
         for workspace in sideGateWorkspaces where workspace.canOperateSideGate {
-            _ = await repairConnection(workspace)
+            guard busy[workspace.id] == nil else { continue }
+            busy[workspace.id] = .restart
+            invalidateConnection(workspace)
+            do {
+                _ = try await client.reconnect(workspace)
+                await refresh(workspace, forceConnectionCheck: true)
+            } catch {
+                await refresh(workspace)
+                alertMessage = "\(workspace.name)：\(error.localizedDescription)"
+            }
+            busy[workspace.id] = nil
         }
     }
 
@@ -448,6 +483,8 @@ final class WorkspaceStore: ObservableObject {
             alertMessage = "Remove Side Gate 未完成，可以 Retry：\(error.localizedDescription)"
             return
         }
+        try? FileManager.default.removeItem(at: GateUIContext.side(workspace).setupFile(in: configURL.deletingLastPathComponent()))
+        sideGateConnections[workspace.id] = nil
         statuses[workspace.id] = nil
         diagnostics[workspace.id] = nil
         pairingCodes[workspace.id] = nil

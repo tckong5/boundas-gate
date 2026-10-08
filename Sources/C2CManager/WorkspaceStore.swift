@@ -4,7 +4,7 @@ import Foundation
 
 @MainActor
 final class WorkspaceStore: ObservableObject {
-    let gateway = SharedGatewayStore()
+    let gateway: SharedGatewayStore
     @Published private(set) var workspaces: [WorkspaceRecord] = []
     @Published private(set) var statuses: [UUID: WorkspaceStatus] = [:]
     @Published private(set) var busy: [UUID: WorkspaceOperation] = [:]
@@ -17,7 +17,7 @@ final class WorkspaceStore: ObservableObject {
     @Published var guidedWorkspaceID: UUID?
     @Published var stableWorkspaceID: UUID?
 
-    private let client = C2CClient()
+    private let client: any SideGateClient
     private let checker = ConnectionChecker()
     private var checkTasks: [UUID: Task<ConnectionDiagnostics, Never>] = [:]
     private var checkTokens: [UUID: UUID] = [:]
@@ -25,13 +25,18 @@ final class WorkspaceStore: ObservableObject {
     private let configURL: URL
     private let c2cLogDirectory: URL
 
-    var runningCount: Int { workspaces.filter { statuses[$0.id]?.running == true }.count }
-    var healthyConnectionCount: Int { workspaces.filter { diagnostics[$0.id]?.isUsable == true }.count }
+    var runningCount: Int { sideGateWorkspaces.filter { statuses[$0.id]?.running == true }.count }
+    var healthyConnectionCount: Int { sideGateWorkspaces.filter { $0.canOperateSideGate && diagnostics[$0.id]?.isUsable == true }.count }
+    var sideGateWorkspaces: [WorkspaceRecord] { workspaces.filter(\.belongsToSideGates) }
 
-    init() {
-        configURL = AppDataPaths.current.workspaces
+    init(configURL: URL? = nil, client: (any SideGateClient)? = nil,
+         gateway: SharedGatewayStore? = nil, automaticallyRefresh: Bool = true) {
+        self.configURL = configURL ?? AppDataPaths.current.workspaces
+        self.client = client ?? C2CClient()
+        self.gateway = gateway ?? SharedGatewayStore(automaticallyRefresh: automaticallyRefresh)
         c2cLogDirectory = AppDataPaths.current.c2cLogs
         load()
+        guard automaticallyRefresh else { return }
         Task { [weak self] in
             while let self {
                 await self.refreshAll()
@@ -71,7 +76,17 @@ final class WorkspaceStore: ObservableObject {
             return false
         }
         if let existing = workspaces.first(where: { $0.path == canonical.path }) {
-            if selectedID != SharedGatewayStore.selectionID { selectedID = existing.id }
+            if selectedID != SharedGatewayStore.selectionID {
+                guard existing.sideGateRemovalState == nil else {
+                    alertMessage = "請先 Retry 完成 Remove Side Gate，再重新加入。"
+                    return false
+                }
+                if let index = workspaces.firstIndex(where: { $0.id == existing.id }) {
+                    workspaces[index].sideGateAdded = true
+                    save()
+                }
+                selectedID = existing.id
+            }
             return true
         }
 
@@ -81,7 +96,8 @@ final class WorkspaceStore: ObservableObject {
         let displayName = workspaces.contains(where: { $0.name == folderName })
             ? "\(folderName) · \(canonical.deletingLastPathComponent().lastPathComponent)"
             : folderName
-        let record = WorkspaceRecord(name: displayName, path: canonical.path, c2cID: String(c2cID))
+        var record = WorkspaceRecord(name: displayName, path: canonical.path, c2cID: String(c2cID))
+        record.sideGateAdded = selectedID != SharedGatewayStore.selectionID
         workspaces.append(record)
         if selectedID != SharedGatewayStore.selectionID { selectedID = record.id }
         save()
@@ -99,12 +115,13 @@ final class WorkspaceStore: ObservableObject {
 
     func refreshAll() async {
         pairingCodes = pairingCodes.filter { $0.value.expiresAt > Date() }
-        for workspace in workspaces where busy[workspace.id] == nil {
+        for workspace in sideGateWorkspaces where workspace.canOperateSideGate && busy[workspace.id] == nil {
             await refresh(workspace)
         }
     }
 
     func refresh(_ workspace: WorkspaceRecord, forceConnectionCheck: Bool = false) async {
+        guard let workspace = operableSideGate(workspace) else { return }
         guard FileManager.default.fileExists(atPath: workspace.path) else {
             invalidateConnection(workspace)
             statuses[workspace.id] = nil
@@ -114,7 +131,7 @@ final class WorkspaceStore: ObservableObject {
         do {
             let status = try await client.status(for: workspace)
             guard revisions[workspace.id, default: 0] == revision,
-                  workspaces.contains(where: { $0.id == workspace.id }) else { return }
+                  operableSideGate(workspace) != nil else { return }
             let previous = statuses[workspace.id]
             let changed = previous?.port != status.port || previous?.pid != status.pid
                 || previous?.running != status.running || previous?.mcpURL != status.mcpURL
@@ -147,6 +164,7 @@ final class WorkspaceStore: ObservableObject {
     }
 
     private func checkConnection(_ workspace: WorkspaceRecord, status: WorkspaceStatus, force: Bool) async {
+        guard operableSideGate(workspace) != nil else { return }
         if checkTasks[workspace.id] != nil && !force { return }
         checkTasks[workspace.id]?.cancel()
         let token = UUID()
@@ -165,7 +183,7 @@ final class WorkspaceStore: ObservableObject {
     }
 
     func diagnoseConnection(_ workspace: WorkspaceRecord) async {
-        guard busy[workspace.id] == nil else { return }
+        guard operableSideGate(workspace) != nil, busy[workspace.id] == nil else { return }
         busy[workspace.id] = .diagnose
         defer { busy[workspace.id] = nil }
         invalidateConnection(workspace)
@@ -173,6 +191,7 @@ final class WorkspaceStore: ObservableObject {
     }
 
     func setConnectorURL(_ workspace: WorkspaceRecord, to value: String) {
+        guard operableSideGate(workspace) != nil else { return }
         guard let normalized = EndpointAddress.mcpURL(value), normalized.hasPrefix("https://") else {
             alertMessage = "請貼上 ChatGPT connector 入面嘅 HTTPS Server URL（/mcp）。"
             return
@@ -188,7 +207,7 @@ final class WorkspaceStore: ObservableObject {
     }
 
     func start(_ workspace: WorkspaceRecord, reportErrors: Bool = true) async {
-        let workspace = workspaces.first(where: { $0.id == workspace.id }) ?? workspace
+        guard let workspace = operableSideGate(workspace) else { return }
         guard busy[workspace.id] == nil else { return }
         busy[workspace.id] = .start
         invalidateConnection(workspace)
@@ -211,7 +230,7 @@ final class WorkspaceStore: ObservableObject {
     }
 
     func stop(_ workspace: WorkspaceRecord) async {
-        guard busy[workspace.id] == nil else { return }
+        guard let workspace = operableSideGate(workspace), busy[workspace.id] == nil else { return }
         busy[workspace.id] = .stop
         invalidateConnection(workspace)
         defer { busy[workspace.id] = nil }
@@ -226,7 +245,7 @@ final class WorkspaceStore: ObservableObject {
     }
 
     func restart(_ workspace: WorkspaceRecord, reportErrors: Bool = true) async {
-        let workspace = workspaces.first(where: { $0.id == workspace.id }) ?? workspace
+        guard let workspace = operableSideGate(workspace) else { return }
         guard busy[workspace.id] == nil else { return }
         busy[workspace.id] = .restart
         invalidateConnection(workspace)
@@ -261,7 +280,7 @@ final class WorkspaceStore: ObservableObject {
 
     func enableStableConnection(_ workspace: WorkspaceRecord) async -> String? {
         guard busy[workspace.id] == nil,
-              workspaces.contains(where: { $0.id == workspace.id }) else { return "Folder 正在處理另一項操作。" }
+              operableSideGate(workspace) != nil else { return "Side Gate 未啟用，或者正在移除。" }
         busy[workspace.id] = .restart
         invalidateConnection(workspace)
         defer { busy[workspace.id] = nil }
@@ -301,7 +320,7 @@ final class WorkspaceStore: ObservableObject {
     }
 
     func repairConnection(_ workspace: WorkspaceRecord) async -> Bool {
-        guard busy[workspace.id] == nil else { return false }
+        guard operableSideGate(workspace) != nil, busy[workspace.id] == nil else { return false }
         if statuses[workspace.id]?.running == true {
             await restart(workspace, reportErrors: false)
         } else {
@@ -316,7 +335,7 @@ final class WorkspaceStore: ObservableObject {
     }
 
     func generatePairingCode(_ workspace: WorkspaceRecord) async {
-        guard busy[workspace.id] == nil else { return }
+        guard operableSideGate(workspace) != nil, busy[workspace.id] == nil else { return }
         busy[workspace.id] = .pair
         defer { busy[workspace.id] = nil }
         do {
@@ -333,46 +352,82 @@ final class WorkspaceStore: ObservableObject {
     }
 
     func startAll() async {
-        for workspace in workspaces where statuses[workspace.id]?.running != true {
+        for workspace in sideGateWorkspaces where workspace.canOperateSideGate && statuses[workspace.id]?.running != true {
             await start(workspace)
         }
     }
 
     func stopAll() async {
-        if gateway.status?.gatewayID != nil { _ = await gateway.perform("stop") }
-        for workspace in workspaces where statuses[workspace.id]?.running == true {
+        for workspace in sideGateWorkspaces where workspace.canOperateSideGate && statuses[workspace.id]?.running == true {
             await stop(workspace)
         }
     }
 
-    func remove(_ workspace: WorkspaceRecord) async {
-        guard busy[workspace.id] == nil else { return }
-        busy[workspace.id] = .stop
+    func reconnectAll() async {
+        for workspace in sideGateWorkspaces where workspace.canOperateSideGate {
+            _ = await repairConnection(workspace)
+        }
+    }
+
+    private func operableSideGate(_ workspace: WorkspaceRecord) -> WorkspaceRecord? {
+        workspaces.first { $0.id == workspace.id && $0.canOperateSideGate }
+    }
+
+    func removeFolder(_ workspace: WorkspaceRecord) {
+        guard let index = workspaces.firstIndex(where: { $0.id == workspace.id }) else { return }
+        guard !workspaces[index].belongsToSideGates else {
+            alertMessage = "請先 Remove Side Gate，再移除 Folder。"
+            return
+        }
+        let original = workspaces
+        workspaces.remove(at: index)
+        guard save() else { workspaces = original; return }
+        // Main Gate checks the live Folder registry on every access; the endpoint stays open.
+        Task { await gateway.refresh() }
+    }
+
+    func removeSideGate(_ workspace: WorkspaceRecord) async {
+        guard let index = workspaces.firstIndex(where: { $0.id == workspace.id && $0.belongsToSideGates }),
+              busy[workspace.id] == nil else { return }
+        let original = workspaces[index]
+        workspaces[index].sideGateRemovalState = .removing
+        workspaces[index].sideGateRemovalError = nil
+        guard save() else { workspaces[index] = original; return }
+        busy[workspace.id] = .remove
+        defer { busy[workspace.id] = nil }
         invalidateConnection(workspace)
-        guard await gateway.perform("remove-root", sourceID: workspace.id.uuidString) else {
-            busy[workspace.id] = nil
-            alertMessage = "未能撤銷 \(workspace.name) 嘅共用授權，未有移除 Folder。\(gateway.message ?? "")"
-            return
-        }
         do {
-            try await client.unpair(workspace)
-            if statuses[workspace.id]?.running == true { try await client.stop(workspace) }
+            try await client.decommission(workspaces[index])
+            guard let index = workspaces.firstIndex(where: { $0.id == workspace.id }) else { return }
+            workspaces[index].sideGateAdded = false
+            workspaces[index].sideGateRemovalState = nil
+            workspaces[index].sideGateRemovalError = nil
+            workspaces[index].lastKnownMCPURL = original.lastObservedMCPURL ?? original.configuredMCPURL ?? original.lastKnownMCPURL
+            workspaces[index].lastObservedMCPURL = nil
+            workspaces[index].previousMCPURL = nil
+            workspaces[index].configuredMCPURL = nil
+            guard save() else { throw C2CClientError.commandFailed("未能儲存 Side Gate 移除結果。") }
         } catch {
-            busy[workspace.id] = nil
-            alertMessage = "未能安全移除 \(workspace.name)：\(error.localizedDescription)"
+            guard let index = workspaces.firstIndex(where: { $0.id == workspace.id }) else { return }
+            workspaces[index].sideGateAdded = true
+            workspaces[index].lastObservedMCPURL = original.lastObservedMCPURL
+            workspaces[index].previousMCPURL = original.previousMCPURL
+            workspaces[index].configuredMCPURL = original.configuredMCPURL
+            workspaces[index].lastKnownMCPURL = original.lastKnownMCPURL
+            workspaces[index].sideGateRemovalState = .failed
+            workspaces[index].sideGateRemovalError = error.localizedDescription
+            save()
+            alertMessage = "Remove Side Gate 未完成，可以 Retry：\(error.localizedDescription)"
             return
         }
-        busy[workspace.id] = nil
-        workspaces.removeAll { $0.id == workspace.id }
         statuses[workspace.id] = nil
         diagnostics[workspace.id] = nil
         pairingCodes[workspace.id] = nil
-        if selectedID == workspace.id { selectedID = SharedGatewayStore.selectionID }
-        save()
+        if selectedID == workspace.id { selectedID = nil }
     }
 
     func copyURL(_ workspace: WorkspaceRecord) {
-        guard diagnostics[workspace.id]?.isUsable == true,
+        guard operableSideGate(workspace) != nil, diagnostics[workspace.id]?.isUsable == true,
               let url = statuses[workspace.id]?.mcpURL else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(url, forType: .string)
@@ -388,7 +443,7 @@ final class WorkspaceStore: ObservableObject {
     }
 
     func copyPairingCode(_ workspace: WorkspaceRecord) {
-        guard let pairing = pairingCodes[workspace.id], pairing.expiresAt > Date() else { return }
+        guard operableSideGate(workspace) != nil, let pairing = pairingCodes[workspace.id], pairing.expiresAt > Date() else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(pairing.value, forType: .string)
     }
@@ -410,18 +465,32 @@ final class WorkspaceStore: ObservableObject {
     private func load() {
         guard let data = try? Data(contentsOf: configURL),
               let saved = try? JSONDecoder().decode([WorkspaceRecord].self, from: data) else { return }
-        workspaces = saved
+        workspaces = saved.map { record in
+            var record = record
+            if record.sideGateAdded == nil {
+                record.sideGateAdded = record.lastObservedMCPURL != nil || record.configuredMCPURL != nil
+            }
+            if record.sideGateRemovalState == .removing {
+                record.sideGateRemovalState = .failed
+                record.sideGateRemovalError = "上次移除未完成，請 Retry。"
+            }
+            return record
+        }
+        if workspaces != saved { save() }
     }
 
-    private func save() {
+    @discardableResult
+    private func save() -> Bool {
         do {
             let directory = configURL.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             let data = try JSONEncoder().encode(workspaces)
             try data.write(to: configURL, options: .atomic)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configURL.path)
+            return true
         } catch {
-            alertMessage = "無法儲存 Workspaces：\(error.localizedDescription)"
+            alertMessage = "無法儲存 Folders：\(error.localizedDescription)"
+            return false
         }
     }
 }

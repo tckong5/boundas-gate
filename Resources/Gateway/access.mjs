@@ -20,13 +20,13 @@ export class FolderAccess {
   }
   current(value) {
     const root = this.registry.active().find(item => item.id === value.rootID);
-    return root?.codeRequired === true && root.epoch === value.epoch && root.codeEpoch === value.codeEpoch;
+    return root?.codeRequired === true && value.gateID === this.registry.read()?.id && root.epoch === value.epoch && root.codeEpoch === value.codeEpoch;
   }
   context(extra) {
     const token = extra.authInfo?.token;
     const session = extra._meta?.['openai/session'];
     if (typeof token !== 'string' || !token || typeof session !== 'string' || !session.length || session.length > 512 || /[\x00-\x1f\x7f]/.test(session)) {
-      throw denied('未收到對話識別資料，已拒絕解鎖。請用 ChatGPT 開新對話重試。');
+      throw denied('未收到對話識別資料，已拒絕解鎖。請提供此對話專用 session_id 再試。');
     }
     return { principal: hash(token), session };
   }
@@ -36,7 +36,7 @@ export class FolderAccess {
     if (root?.codeRequired !== true) throw new Error('請先為呢個 Folder 開啟通行碼。');
     this.revoke(id); // Regeneration invalidates previous codes and capabilities for this root.
     const code = `BG-${randomBytes(12).toString('hex').toUpperCase().match(/.{4}/g).join('-')}`;
-    const value = { rootID: id, epoch: root.epoch, codeEpoch: root.codeEpoch, expiresAt: this.now() + 5 * 60000 };
+    const value = { gateID: this.registry.read().id, rootID: id, epoch: root.epoch, codeEpoch: root.codeEpoch, expiresAt: this.now() + 5 * 60000 };
     this.codes.set(hash(code), value);
     return { ok: true, workspaceID: id, name: root.name, code, expiresAt: value.expiresAt };
   }
@@ -68,14 +68,14 @@ export class FolderAccess {
     if (grant.expiresAt <= now) throw denied('OAuth 授權已過期，請重新連線。');
     this.keys.set(hash(key), grant);
     return { workspace_id: root.id, name: root.name, access_key: key, expires_at: grant.expiresAt,
-      instruction: 'Include this access_key on every tool call for this folder. Do not print, store in files, or share the key. Other folders require their own authorization.' };
+      instruction: 'Include this access_key and the same conversation session_id (when explicit session_id was used) on every tool call for this folder. Do not print, store in files, or share the key. Other folders require their own authorization.' };
   }
   check(root, key, extra) {
     if (root.codeRequired !== true) return;
     this.cleanup();
     const context = this.context(extra);
     const value = typeof key === 'string' ? this.keys.get(hash(key)) : undefined;
-    if (!value || value.rootID !== root.id || value.epoch !== root.epoch || value.codeEpoch !== root.codeEpoch
+    if (!value || value.gateID !== this.registry.read().id || value.rootID !== root.id || value.epoch !== root.epoch || value.codeEpoch !== root.codeEpoch
       || value.principal !== context.principal || value.session !== context.session || value.expiresAt <= this.now()) throw denied();
   }
   status() {

@@ -57,6 +57,29 @@ function writeLedger(directory, ledger) {
   fs.writeFileSync(temporary, JSON.stringify(ledger), { mode: 0o600 });
   fs.renameSync(temporary, file);
 }
+export async function retireRoutes(id, { directory = stateDirectory, binary = findBinary(), run = command } = {}) {
+  mounts(id); // Validate the Gate identity before inspecting its routes.
+  await withLock(directory, async () => {
+    const ledger = readLedger(directory);
+    const entries = Object.entries(ledger).filter(([, entry]) => entry.id === id);
+    if (!entries.length) return;
+    if (!binary) throw new Error('未能清理 Side Gate Tunnel，請連接 Tailscale 後 Retry。');
+    for (const [entryKey, entry] of entries) {
+      const suffix = mounts(id).find(mount => entryKey.endsWith(mount.path))?.path;
+      if (!suffix) throw new Error('Side Gate route 記錄無效，請重新檢查。');
+      const key = entryKey.slice(0, -suffix.length);
+      const config = JSON.parse(await run(binary, ['funnel', 'status', '--json']));
+      const handler = config.Web?.[key]?.Handlers?.[suffix];
+      if (handler && (![entry.target, entry.previousTarget].includes(handler.Proxy) || handler.Path || handler.Text || handler.Redirect)) {
+        throw new Error('Side Gate route 已被外部更改；未有移除其他服務。');
+      }
+      if (handler) await run(binary, ['funnel', '--bg', '--yes', '--https=443', `--set-path=${suffix}`, 'off']);
+      const after = JSON.parse(await run(binary, ['funnel', 'status', '--json']));
+      if (after.Web?.[key]?.Handlers?.[suffix]) throw new Error('Side Gate route 尚未移除，可以 Retry。');
+      delete ledger[entryKey]; writeLedger(directory, ledger);
+    }
+  });
+}
 export { withOwnerLock as withLock } from './owner-lock.mjs';
 function handlerEntries(config, key) { return Object.entries(config?.Web?.[key]?.Handlers ?? {}); }
 export function assertOwnedConfig(config, key, ledger) {

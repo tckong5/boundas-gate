@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, randomBytes } from 'node:crypto';
 import { spawnSync, execFile } from 'node:child_process';
 import http from 'node:http';
 import { promisify } from 'node:util';
@@ -488,4 +488,103 @@ test('new launcher refuses to enable code protection on an older running daemon'
     });
     assert.equal(f.registry.active()[0].codeRequired, false);
   } finally { fake.closeAllConnections(); await new Promise(resolve => fake.close(resolve)); f.clean(); }
+});
+
+test('real Main and Side Gates enforce separate OAuth, decommission, re-add and Folder passcode policy', async () => {
+  const f = fixture(); f.select(0, 1);
+  f.roots[0].sideGateAdded = true; f.roots[1].sideGateAdded = true;
+  secureWrite(f.allowlistFile, f.roots);
+  const gateway = await server(f);
+  const sideEnv = { ...process.env, BOUNDAS_WORKSPACES_FILE: f.allowlistFile, BOUNDAS_GATEWAY_DIR: f.registry.directory,
+    C2C_STATE_DIR: path.join(f.directory, 'side-state'), BOUNDAS_STATE_DIR: path.join(f.directory, 'routes') };
+  const helper = path.resolve('Resources/Gateway/side-lifecycle.mjs');
+  const children = [];
+  const execute = promisify(execFile);
+  async function side(index, legacy = false) {
+    const { spawn } = await import('node:child_process');
+    const child = spawn(process.execPath, legacy
+      ? [path.join(backendRoot, 'bin/c2c.js'), 'serve', '--workspace', f.roots[index].path, '--port', '0']
+      : [helper, 'daemon', backendRoot, f.roots[index].id.toLowerCase(), `--instance-id=${randomBytes(32).toString('hex')}`],
+      { env: sideEnv, stdio: ['ignore', 'ignore', 'ignore'] });
+    children.push(child);
+    const runtimeFile = path.join(sideEnv.C2C_STATE_DIR, 'runtime', `${f.roots[index].c2cID}.json`);
+    const marker = path.join(sideEnv.C2C_STATE_DIR, 'side-gates', `${f.roots[index].c2cID}.json`);
+    const deadline = Date.now() + 15000;
+    while (Date.now() < deadline) {
+      if (fs.existsSync(runtimeFile) && (legacy || fs.existsSync(marker))) {
+        const runtime = JSON.parse(fs.readFileSync(runtimeFile));
+        const endpoint = { adminToken: runtime.adminToken, localBase: () => `http://127.0.0.1:${runtime.port}` };
+        if ((await fetch(`${endpoint.localBase()}/health`)).ok) return endpoint;
+      }
+      if (child.exitCode !== null) throw new Error(`Side Gate daemon exited (${child.exitCode})`);
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    throw new Error('Side Gate test daemon not ready');
+  }
+  async function sidePair(endpoint) {
+    const reply = await control(endpoint, '/admin/pairing');
+    const value = await reply.json(); assert.equal(reply.status, 200);
+    return { pairingCode: value.code, expiresAt: value.expiresAt };
+  }
+  async function statusCode(endpoint, token) {
+    return (await fetch(`${endpoint.localBase()}/mcp`, { method: 'POST', headers: {
+      Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) })).status;
+  }
+  try {
+    const mainTokens = await authorize(gateway, await pair(gateway));
+    let a = await side(0); let b = await side(1, true);
+    const aStatus = JSON.parse((await execute(process.execPath, [helper, 'status', backendRoot, f.roots[0].id.toLowerCase()], { env: sideEnv })).stdout);
+    assert.equal(aStatus.ok, true); assert.equal(aStatus.roots[0].id, f.roots[0].c2cID);
+    const aTokens = await authorize(a, await sidePair(a)); const bTokens = await authorize(b, await sidePair(b));
+    const oldSideAuth = fs.readFileSync(path.join(sideEnv.C2C_STATE_DIR, 'auth', `${f.roots[1].c2cID}.json`));
+    const migration = await execute(process.execPath, [helper, 'status', backendRoot, f.roots[1].id.toLowerCase()], { env: sideEnv, timeout: 30000 });
+    assert.equal(JSON.parse(migration.stdout).running, false);
+    assert.deepEqual(fs.readFileSync(path.join(sideEnv.C2C_STATE_DIR, 'auth', `${f.roots[1].c2cID}.json`)), oldSideAuth);
+    b = await side(1);
+    assert.equal(await statusCode(a, aTokens.access_token), 200);
+    assert.equal(await statusCode(b, bTokens.access_token), 200);
+    assert.equal(await statusCode(a, mainTokens.access_token), 401);
+    assert.equal(await statusCode(b, aTokens.access_token), 401);
+    assert.equal(await statusCode(a, bTokens.access_token), 401);
+    assert.equal(await statusCode(gateway, aTokens.access_token), 401);
+    assert.equal(data(await read(gateway, mainTokens, f.roots[0].c2cID)).content, 'A read test');
+    const configBefore = fs.readFileSync(path.join(f.registry.directory, 'config.json'));
+    const authBefore = fs.readFileSync(path.join(f.registry.directory, 'auth.json'));
+    f.roots[0].sideGateRemovalState = 'removing'; secureWrite(f.allowlistFile, f.roots);
+    assert.equal(await statusCode(a, aTokens.access_token), 401);
+    const removal = await execute(process.execPath, [helper, 'decommission', backendRoot, f.roots[0].id.toLowerCase()], { env: sideEnv, timeout: 30000 });
+    assert.equal(JSON.parse(removal.stdout).ok, true);
+    assert.equal(fs.existsSync(path.join(sideEnv.C2C_STATE_DIR, 'auth', `${f.roots[0].c2cID}.json`)), false);
+    f.roots[0].sideGateAdded = false; delete f.roots[0].sideGateRemovalState; secureWrite(f.allowlistFile, f.roots);
+    assert.deepEqual(fs.readFileSync(path.join(f.registry.directory, 'config.json')), configBefore);
+    assert.deepEqual(fs.readFileSync(path.join(f.registry.directory, 'auth.json')), authBefore);
+    assert.equal(data(await read(gateway, mainTokens, f.roots[0].c2cID)).content, 'A read test');
+    assert.equal(await statusCode(b, bTokens.access_token), 200);
+    assert.equal(f.registry.active().length, 2);
+    f.roots[0].sideGateAdded = true; secureWrite(f.allowlistFile, f.roots);
+    a = await side(0);
+    assert.equal(await statusCode(a, aTokens.access_token), 401);
+    const fresh = await authorize(a, await sidePair(a));
+    assert.equal(await statusCode(a, fresh.access_token), 200);
+    f.registry.setCodePolicy(f.roots[0].c2cID, true);
+    assert.equal(await statusCode(a, fresh.access_token), 200); // Policy guards operations, not OAuth transport.
+    assert.equal((await read(a, fresh, f.roots[0].c2cID)).isError, true);
+    const generated = JSON.parse((await execute(process.execPath, [helper, 'folder-code', backendRoot, f.roots[0].id.toLowerCase(), JSON.stringify({ workspaceID: f.roots[0].c2cID })], { env: sideEnv })).stdout);
+    const unlocked = data(await rpc(a, fresh.access_token, 'unlock_workspace', { code: generated.code, session_id: 'side-review' }));
+    assert.equal((await rpc(a, fresh.access_token, 'read_file', { path: 'hello.txt', access_key: unlocked.access_key, session_id: 'side-review' })).isError, undefined);
+    await execute(process.execPath, [helper, 'lock-folder', backendRoot, f.roots[0].id.toLowerCase(), JSON.stringify({ workspaceID: f.roots[0].c2cID })], { env: sideEnv });
+    assert.equal((await rpc(a, fresh.access_token, 'read_file', { path: 'hello.txt', access_key: unlocked.access_key, session_id: 'side-review' })).isError, true);
+    assert.equal((await read(gateway, mainTokens, f.roots[0].c2cID)).isError, true);
+    assert.equal(await statusCode(b, bTokens.access_token), 200);
+    f.registry.revokeSource(f.roots[0].id);
+    assert.equal((await read(a, fresh, f.roots[0].c2cID)).isError, true); // Turning Main sharing off cannot bypass Folder policy.
+    f.registry.configure([f.roots[0].id, f.roots[1].id], backend.Workspace);
+    f.registry.setCodePolicy(f.roots[0].c2cID, false);
+    assert.equal(await statusCode(a, fresh.access_token), 200);
+  } finally {
+    for (const child of children) if (child.exitCode === null) child.kill('SIGTERM');
+    await Promise.all(children.map(child => child.exitCode !== null ? Promise.resolve() : new Promise(resolve => child.once('exit', resolve))));
+    await gateway.close(); f.clean();
+  }
 });

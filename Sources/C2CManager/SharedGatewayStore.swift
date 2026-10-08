@@ -138,6 +138,7 @@ final class SharedGatewayStore: ObservableObject {
     @Published var message: String?
     private let client = C2CClient()
     private let checker = ConnectionChecker()
+    private let gateSourceID: String?
     private var revision = 0
     private var reconnectPolicy = GatewayReconnectPolicy()
     private var wakeObserver: AnyCancellable?
@@ -182,7 +183,9 @@ final class SharedGatewayStore: ObservableObject {
         return "暫時未能連線，請按「重新檢查」；詳情已收喺連線詳細資料。"
     }
 
-    init() {
+    init(automaticallyRefresh: Bool = true, gateSourceID: String? = nil) {
+        self.gateSourceID = gateSourceID
+        guard automaticallyRefresh && gateSourceID == nil else { return }
         Task { [weak self] in
             while let self {
                 if !self.working {
@@ -212,7 +215,7 @@ final class SharedGatewayStore: ObservableObject {
         checking = true
         defer { if currentRevision == revision { checking = false } }
         do {
-            let response = try await client.gateway("status")
+            let response = try await client.gateway("status", sourceID: gateSourceID)
             let status = try JSONDecoder().decode(GatewayStatus.self, from: response)
             guard currentRevision == revision else { return }
             if self.status?.running != status.running || self.status?.gatewayID != status.gatewayID
@@ -230,7 +233,7 @@ final class SharedGatewayStore: ObservableObject {
             }
             if let pairing, pairing.expiration <= Date() || status.pairingActive == false { self.pairing = nil }
             if let id = status.gatewayID {
-                let checked = await checker.check(workspaceID: id, status: status.bridgeStatus, service: "boundas-gateway")
+                let checked = await checker.check(workspaceID: id, status: status.bridgeStatus, service: gateSourceID == nil ? "boundas-gateway" : "c2c-bridge")
                 guard currentRevision == revision else { return }
                 diagnostics = checked
                 if usable {
@@ -266,7 +269,7 @@ final class SharedGatewayStore: ObservableObject {
             else if let selectedIDs { input = try JSONEncoder().encode(["selectedIDs": selectedIDs]) }
             else if action == "confirm", usable, let url = status?.mcpURL { input = try JSONEncoder().encode(["url": url]) }
             else { input = nil }
-            let response = try await client.gateway(action, input: input)
+            let response = try await client.gateway(action, input: input, sourceID: gateSourceID)
             if action == "pair" { pairing = try JSONDecoder().decode(GatewayPairing.self, from: response) }
             else if ["configure", "remove-root", "stop", "revoke"].contains(action) { pairing = nil }
             if action == "folder-code" {

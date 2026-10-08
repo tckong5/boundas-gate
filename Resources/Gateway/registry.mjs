@@ -13,6 +13,13 @@ export function secureWrite(file, value) {
 }
 export class Registry {
   constructor({ directory = gatewayDirectory, allowlistFile = workspaceFile } = {}) { this.directory = directory; this.allowlistFile = allowlistFile; }
+  ensure() {
+    const existing = this.read();
+    if (existing) return existing;
+    const config = { id: randomBytes(6).toString('hex'), roots: [] };
+    secureWrite(path.join(this.directory, 'config.json'), config);
+    return config;
+  }
   read() {
     let config;
     try { config = JSON.parse(fs.readFileSync(path.join(this.directory, 'config.json'), 'utf8')); }
@@ -92,12 +99,30 @@ export class Registry {
   setCodePolicy(id, required) {
     if (typeof required !== 'boolean') throw new Error('通行碼設定無效。');
     const config = this.read();
-    const root = config?.roots.find(item => item.id === id && this.available(item));
-    if (!root) throw new Error('請先儲存要共用嘅 Folder。');
+    const added = this.addedFolders();
+    const root = config?.roots.find(item => item.id === id && added.some(folder => folder.c2cID === id && folder.path === item.path && folder.id.toLowerCase() === item.sourceID.toLowerCase()));
+    if (!root) throw new Error('請先加入呢個 Folder。');
     if ((root.codeRequired ?? false) === required) return root;
     const updated = { ...root, codeRequired: required, codeEpoch: randomBytes(16).toString('hex') };
     secureWrite(path.join(this.directory, 'config.json'), { ...config, roots: config.roots.map(item => item.id === id ? updated : item) });
     return updated;
+  }
+  ensureFolderPolicy(record) {
+    const config = this.ensure();
+    const old = config.roots.find(root => root.id === record.c2cID);
+    if (!this.addedFolders().some(folder => folder.id === record.id && folder.c2cID === record.c2cID && folder.path === record.path)) throw new Error('Folder 未加入。');
+    if (old) {
+      if (old.path !== record.path) throw new Error('Folder policy 路徑不符。');
+      if (old.sourceID === record.id.toLowerCase()) return old;
+      const updated = { ...old, sourceID: record.id.toLowerCase(), name: record.name,
+        enabled: false, epoch: randomBytes(16).toString('hex'), codeEpoch: randomBytes(16).toString('hex') };
+      secureWrite(path.join(this.directory, 'config.json'), { ...config, roots: config.roots.map(root => root.id === old.id ? updated : root) });
+      return updated;
+    }
+    const root = { id: record.c2cID, sourceID: record.id.toLowerCase(), name: record.name, path: record.path,
+      enabled: false, epoch: randomBytes(16).toString('hex'), codeRequired: false, codeEpoch: randomBytes(16).toString('hex') };
+    secureWrite(path.join(this.directory, 'config.json'), { ...config, roots: [...config.roots, root] });
+    return root;
   }
   revokeSource(sourceID) {
     if (typeof sourceID !== 'string') throw new Error('Folder ID 無效。');

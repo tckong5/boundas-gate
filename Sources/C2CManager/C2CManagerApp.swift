@@ -96,7 +96,7 @@ private struct MenuBarContent: View {
         if store.workspaces.isEmpty {
             Text("尚未加入 Workspace")
         }
-        ForEach(store.workspaces) { workspace in
+        ForEach(store.sideGateWorkspaces) { workspace in
             Menu {
                 Text(workspace.path)
                 if let status = store.statuses[workspace.id] {
@@ -351,7 +351,7 @@ private struct WorkspaceDetail: View {
                         Button("Open Logs") { store.openLogs(workspace) }
                         Button("Open ChatGPT Plugins") { store.openChatGPT() }
                         Spacer()
-                        Button("Remove Workspace", role: .destructive) { confirmRemove = true }
+                        Button(workspace.sideGateRemovalState == .failed ? "Retry Remove Side Gate" : "Remove Side Gate", role: .destructive) { confirmRemove = true }
                             .disabled(working)
                     }
                 }
@@ -370,9 +370,9 @@ private struct WorkspaceDetail: View {
         .onChange(of: workspace.id) { _, _ in proposedName = workspace.name }
         .onChange(of: workspace.name) { _, newName in proposedName = newName }
         .confirmationDialog("移除 \(workspace.name)？", isPresented: $confirmRemove) {
-            Button("移除 Workspace", role: .destructive) { Task { await store.remove(workspace) } }
+            Button("Remove Side Gate", role: .destructive) { Task { await store.removeSideGate(workspace) } }
         } message: {
-            Text("會撤銷已授權連線，並停止運行中嘅 Bridge 同 Tunnel。Folder 入面嘅檔案不會刪除。")
+            Text("只停止及撤銷呢個 Side Gate。Folder、Main Gate 分享及 Passcode Protection 保留。")
         }
     }
 

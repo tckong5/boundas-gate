@@ -9,14 +9,23 @@ struct WorkspaceRecord: Codable, Identifiable, Hashable {
     var previousMCPURL: String?
     var configuredMCPURL: String?
     var connectionProvider: ConnectionProvider?
+    var sideGateAdded: Bool?
+    var sideGateRemovalState: SideGateRemovalState?
+    var sideGateRemovalError: String?
+    var lastKnownMCPURL: String?
 
     var provider: ConnectionProvider { connectionProvider ?? .cloudflare }
+    var belongsToSideGates: Bool {
+        sideGateAdded == true
+    }
+    var canOperateSideGate: Bool { belongsToSideGates && sideGateRemovalState == nil }
 
     init(name: String, path: String, c2cID: String) {
         self.id = UUID()
         self.name = name
         self.path = path
         self.c2cID = c2cID
+        self.sideGateAdded = false
     }
 
     mutating func observeMCPURL(_ url: String) {
@@ -33,6 +42,8 @@ struct WorkspaceRecord: Codable, Identifiable, Hashable {
         return current == configured ? .matches : .needsUpdate
     }
 }
+
+enum SideGateRemovalState: String, Codable { case removing, failed }
 
 enum ConnectionProvider: String, Codable {
     case cloudflare
@@ -81,6 +92,7 @@ struct PairingCode: Equatable {
 }
 
 enum WorkspaceOperation: String {
+    case remove = "Removing…"
     case start = "啟動中"
     case stop = "停止中"
     case restart = "重新啟動中"

@@ -14,12 +14,13 @@ export async function loadBackend(backendRoot) {
   const require = createRequire(path.join(backendRoot, 'package.json'));
   const dependency = name => import(pathToFileURL(require.resolve(name)).href);
   const local = name => import(pathToFileURL(path.join(backendRoot, 'dist', name)).href);
-  const [expressModule, sdk, zod, auth, oauth, middleware, pairing, mcpHTTP, workspaces, git, search, logger] = await Promise.all([
+  const [expressModule, sdk, zod, auth, oauth, middleware, pairing, mcpHTTP, workspaces, git, search, logger, records, output, tunnel] = await Promise.all([
     dependency('express'), dependency('@modelcontextprotocol/sdk/server/mcp.js'), dependency('zod'),
     local('auth/store.js'), local('auth/oauth.js'), local('auth/middleware.js'), local('pairing/manager.js'), local('mcp/http.js'),
     local('workspace/manager.js'), local('workspace/git.js'), local('workspace/search.js'), local('logger/index.js'),
+    local('execution/records.js'), local('execution/output.js'), local('tunnel/cloudflared.js'),
   ]);
-  return { express: expressModule.default, ...sdk, z: zod.z, ...auth, ...oauth, ...middleware, ...pairing, ...mcpHTTP, ...workspaces, ...git, ...search, logger: logger.nullLogger };
+  return { express: expressModule.default, ...sdk, z: zod.z, ...auth, ...oauth, ...middleware, ...pairing, ...mcpHTTP, ...workspaces, ...git, ...search, ...records, ...output, ...tunnel, logger: logger.nullLogger };
 }
 function readGit(root, operation) {
   // Git reads must not run repository fsmonitor hooks or inherit another repo's overrides.
@@ -45,19 +46,25 @@ function failure(error) { return { content: [{ type: 'text', text: JSON.stringif
 export function makeMcpServer(backend, registry, access = new FolderAccess(registry)) {
   const { McpServer, z, Workspace, gitInfo, gitStatus, gitDiff, searchWorkspace } = backend;
   const server = new McpServer({ name: 'Boundas Gate', version: '1.2.0' }, { capabilities: { tools: {} }, instructions: note });
-  const rootID = z.string().regex(/^[a-f0-9]{12}$/).describe('ID returned by list_workspaces; never a folder path.');
+  const rootIDShape = z.string().regex(/^[a-f0-9]{12}$/).describe('ID returned by list_workspaces; never a folder path.');
+  const rootID = registry.sideMode ? rootIDShape.default(registry.read().id) : rootIDShape;
   const accessKey = z.string().max(128).optional().describe('Temporary access_key returned by unlock_workspace. Required only for a folder with access-code protection enabled.');
+  const sessionID = z.string().min(1).max(512).optional().describe('Use a unique ID for this conversation when the AI app does not supply conversation metadata. Reuse it with the access_key on subsequent calls.');
+  const context = (args, extra) => args.session_id && !extra._meta?.['openai/session']
+    ? { ...extra, _meta: { ...extra._meta, 'openai/session': args.session_id } } : extra;
   const requireScope = (extra, scope) => {
     if (!extra.authInfo?.scopes?.includes(scope)) throw Object.assign(new Error(`This operation requires ${scope}.`), { code: 'INSUFFICIENT_SCOPE' });
     registry.requireConnection(extra.authInfo.scopes);
     return extra.authInfo.scopes;
   };
   server.registerTool('unlock_workspace', { title: 'Unlock one folder', description: 'Exchange a user-provided, one-time Folder access code for a temporary access_key limited to that folder, this OAuth credential and conversation. Does not grant new OAuth scopes. Never print the code or key.',
-    inputSchema: { code: z.string().min(1).max(128) }, annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false, idempotentHint: false } }, async (args, extra) => {
+    inputSchema: { code: z.string().min(1).max(128), session_id: sessionID }, annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false, idempotentHint: false } }, async (args, extra) => {
+    extra = context(args, extra);
     try { return result(access.unlock(args.code, requireScope(extra, 'workspace.read'), extra)); }
     catch (error) { return failure(error); }
   });
-  server.registerTool('list_workspaces', { title: 'List shared folders', description: 'List folders currently shared in the Boundas Gate App. Changes apply on the next request without re-pairing. Locked folders are hidden unless a valid access_key is supplied.', inputSchema: { access_key: accessKey }, annotations: { readOnlyHint: true } }, async (args, extra) => {
+  server.registerTool('list_workspaces', { title: 'List shared folders', description: 'List folders currently shared in the Boundas Gate App. Changes apply on the next request without re-pairing. Locked folders are hidden unless a valid access_key is supplied.', inputSchema: { access_key: accessKey, session_id: sessionID }, annotations: { readOnlyHint: true } }, async (args, extra) => {
+    extra = context(args, extra);
     try {
       requireScope(extra, 'workspace.read');
       return result({ workspaces: registry.active().filter(root => {
@@ -66,8 +73,9 @@ export function makeMcpServer(backend, registry, access = new FolderAccess(regis
     } catch (error) { return failure(error); }
   });
   const register = (name, title, scope, shape, operation) => server.registerTool(name, {
-    title, description: `${title} in one permitted folder. ${note}`, inputSchema: { workspace_id: rootID, access_key: accessKey, ...shape }, annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    title, description: `${title} in one permitted folder. ${note}`, inputSchema: { workspace_id: rootID, access_key: accessKey, session_id: sessionID, ...shape }, annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   }, async (args, extra) => {
+    extra = context(args, extra);
     try {
       const scopes = requireScope(extra, scope);
       const root = registry.authorized(args.workspace_id, scopes);
@@ -88,6 +96,25 @@ export function makeMcpServer(backend, registry, access = new FolderAccess(regis
   register('search_workspace', 'Search files', 'workspace.search', { query: z.string().min(2).max(4096), path: z.string().optional(), glob: z.string().optional(), limit: z.number().int().min(1).max(200).default(50) }, (workspace, args) => searchWorkspace(workspace, { ...args, regex: false }));
   register('git_status', 'Read Git status', 'git.read', {}, workspace => readGit(workspace.root, () => gitStatus(workspace)));
   register('git_diff', 'Read Git diff', 'git.read', { mode: z.enum(['unstaged', 'staged', 'head']).default('unstaged'), path: z.string().optional(), offset: z.number().int().min(0).default(0), max_bytes: z.number().int().min(1024).max(262144).default(65536) }, (workspace, args) => readGit(workspace.root, () => gitDiff(workspace, { mode: args.mode, offset: args.offset, maxBytes: args.max_bytes }, args.path === undefined ? undefined : workspace.resolve(args.path).rel)));
+  if (registry.sideMode) {
+    register('test_status', 'Read test status', 'execution.read', {}, workspace => {
+      const latest = backend.latestExecutionRecord(workspace.id);
+      return latest ? { available: true, taskId: latest.taskId, iteration: latest.iteration, tests: latest.tests,
+        exitStatus: latest.exitStatus, timestamp: latest.timestamp, outputAvailable: Boolean(latest.outputAvailable), outputId: latest.outputId ?? null }
+        : { available: false, message: 'No execution records yet for this folder.' };
+    });
+    register('execution_summary', 'Read execution summary', 'execution.read', { limit: z.number().int().min(1).max(50).default(5) },
+      (workspace, args) => ({ records: backend.readExecutionRecords(workspace.id, args.limit) }));
+    register('execution_output', 'Read execution output', 'execution.read', { action: z.enum(['list', 'read']).default('list'), id: z.number().int().positive().optional(), limit: z.number().int().min(1).max(50).default(20) }, (workspace, args) => {
+      if (args.action === 'list') return { action: 'list', items: backend.listExecutionOutputs(workspace.id, args.limit).map(item => ({
+        id: item.id, command: item.command, exitCode: item.exitCode, timestamp: item.timestamp, taskId: item.taskId ?? null,
+        iteration: item.iteration ?? null, readable: item.allowed, status: item.allowed ? 'readable' : 'restricted', truncated: item.truncated, sizeBytes: item.sizeBytes })) };
+      if (args.id === undefined) throw Object.assign(new Error('read requires id'), { code: 'INVALID_ARGUMENTS' });
+      const output = backend.readExecutionOutput(workspace.id, args.id);
+      if (!output.ok) throw Object.assign(new Error('Execution output unavailable.'), { code: output.error });
+      return { action: 'read', id: output.meta.id, command: output.meta.command, exitCode: output.meta.exitCode, timestamp: output.meta.timestamp, truncated: output.meta.truncated, text: output.text };
+    });
+  }
   return server;
 }
 
@@ -107,9 +134,19 @@ export async function startGateway({ backendRoot, registry = new Registry(), tun
   const rg = ['/opt/homebrew/bin/rg', '/usr/local/bin/rg', '/usr/bin/rg'].find(file => { try { fs.accessSync(file, fs.constants.X_OK); return true; } catch { return false; } });
   if (rg) process.env.C2C_RG_PATH = rg; else process.env.C2C_DISABLE_RG = '1';
   const InstanceAuthStore = instanceAuthStore(backend.AuthStore, registry);
-  const authStore = new InstanceAuthStore(config.id, { file: path.join(registry.directory, 'auth.json') });
+  const authStore = new InstanceAuthStore(config.id, { file: authFile ?? path.join(registry.directory, 'auth.json') });
   const pairing = new backend.PairingManager(config.id);
   const app = backend.express(); app.disable('x-powered-by'); app.set('trust proxy', true);
+  if (sideRoot) app.use((req, res, next) => {
+    const aliases = { '/admin/info': '/control/info', '/admin/pairing': '/control/pair', '/admin/revoke-all': '/control/revoke',
+      '/admin/tunnel/start': '/control/tunnel/start', '/admin/tunnel/stop': '/control/tunnel/stop', '/admin/shutdown': '/control/shutdown' };
+    const route = req.path; if (!aliases[route]) { next(); return; }
+    req.url = aliases[route];
+    const json = res.json.bind(res);
+    res.json = value => json(route === '/admin/pairing' ? { ...value, code: value.pairingCode }
+      : route === '/admin/tunnel/start' ? { ...value, url: value.mcpUrl?.replace(/\/mcp$/, '') } : value);
+    next();
+  });
   const adminToken = `bg_admin_${randomBytes(32).toString('hex')}`;
   let publicURL = expectedURL;
   let localPort;
@@ -129,7 +166,18 @@ export async function startGateway({ backendRoot, registry = new Registry(), tun
   });
   app.use(backend.createOAuthRouter({ store: authStore, pairing, workspaceName: 'Boundas Gate（讀取 App 目前及之後確認分享嘅 Folders；可隨時停止分享）', getBaseUrl, logger: backend.logger }));
   const mcpHandler = backend.createMcpHttpHandler(() => makeMcpServer(backend, registry, access), backend.logger);
-  app.all('/mcp', backend.express.json({ limit: '1mb' }), backend.bearerAuth({ store: authStore, workspaceId: config.id, getBaseUrl, logger: backend.logger }), (req, res) => { void mcpHandler(req, res); });
+  app.all('/mcp', backend.express.json({ limit: '1mb' }), backend.bearerAuth({ store: authStore, workspaceId: config.id, getBaseUrl, logger: backend.logger }), (req, res) => {
+    // Removed/retiring Side membership rejects admission, while private admin
+    // remains available to finish decommissioning. Policy locks only tools.
+    if (registry.sideMode) {
+      try { registry.read(); }
+      catch { res.status(401).json({ error: 'gate_not_available' }); return; }
+    }
+    void mcpHandler(req, res).catch(() => {
+      console.error('MCP request failed before a response could be completed.');
+      if (!res.headersSent) res.status(503).json({ error: 'gate_not_available' });
+    });
+  });
   const admin = (req, res, next) => {
     const remote = req.socket.remoteAddress;
     if (!['127.0.0.1', '::ffff:127.0.0.1', '::1'].includes(remote) || req.headers['x-forwarded-for'] || req.headers['cf-connecting-ip'] || req.headers.authorization !== `Bearer ${adminToken}`) { res.status(404).end(); return; }
@@ -169,6 +217,10 @@ export async function startGateway({ backendRoot, registry = new Registry(), tun
       publicURL = url; persist(); res.json({ ok: true, mcpUrl: `${url}/mcp` });
     }).catch(error => res.status(500).json({ ok: false, message: error.message }));
   });
+  app.post('/control/tunnel/stop', admin, (_req, res) => {
+    void provider.stop().then(() => { publicURL = null; persist(); res.json({ ok: true }); })
+      .catch(() => res.status(503).json({ ok: false, message: 'Tunnel 未完成停止，請稍後再試。' }));
+  });
   app.post('/control/shutdown', admin, (_req, res) => { res.json({ ok: true }); setTimeout(() => { void close().then(() => { if (persistRuntime) process.exit(0); }); }, 100); });
   const server = await new Promise((resolve, reject) => { const listening = app.listen(port, '127.0.0.1', () => resolve(listening)); listening.once('error', reject); });
   localPort = server.address().port; persist();
@@ -181,5 +233,5 @@ export async function startGateway({ backendRoot, registry = new Registry(), tun
       try { clearOwnedRuntime(runtimeFile, runtimeRecord()); } catch {}
     }
   }
-  return { port: localPort, id: config.id, authStore, provider, instanceID, adminToken, registry, localBase: () => `http://127.0.0.1:${localPort}`, close };
+  return { port: localPort, id: config.id, authStore, pairing, provider, access, instanceID, adminToken, registry, localBase: () => `http://127.0.0.1:${localPort}`, close };
 }

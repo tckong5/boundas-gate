@@ -22,7 +22,18 @@ enum C2CClientError: LocalizedError {
     }
 }
 
-struct C2CClient {
+@MainActor
+protocol SideGateClient {
+    func status(for workspace: WorkspaceRecord) async throws -> WorkspaceStatus
+    func start(_ workspace: WorkspaceRecord) async throws -> StartResult
+    func stop(_ workspace: WorkspaceRecord) async throws
+    func pair(_ workspace: WorkspaceRecord) async throws -> PairingCode
+    func unpair(_ workspace: WorkspaceRecord) async throws
+    func decommission(_ workspace: WorkspaceRecord) async throws
+    func tailscaleSetup() async throws -> TailscaleSetup
+}
+
+struct C2CClient: SideGateClient {
     private let cliPath = RuntimePaths.current.cli
     private static let resolvedNodePath = findSupportedNode()
 
@@ -98,7 +109,7 @@ struct C2CClient {
     }
 
     func status(for workspace: WorkspaceRecord) async throws -> WorkspaceStatus {
-        let result = try await run(["status", "--workspace", workspace.path, "--json"])
+        let result = try await sideLifecycle("status", workspace)
         guard result.code == 0 else { throw C2CClientError.commandFailed(result.error.isEmpty ? result.output : result.error) }
         guard let data = result.output.data(using: .utf8),
               let status = try? JSONDecoder().decode(WorkspaceStatus.self, from: data) else {
@@ -108,13 +119,7 @@ struct C2CClient {
     }
 
     func start(_ workspace: WorkspaceRecord) async throws -> StartResult {
-        let result: CommandResult
-        if workspace.provider == .tailscale {
-            let backend = URL(fileURLWithPath: cliPath).deletingLastPathComponent().deletingLastPathComponent().path
-            result = try await run(["start", backend, workspace.path], entry: tailscaleLauncher)
-        } else {
-            result = try await run(["start", "--workspace", workspace.path, "--tunnel", "--json"])
-        }
+        let result = try await sideLifecycle("start", workspace)
         guard let data = result.output.data(using: .utf8),
               let response = try? JSONDecoder().decode(StartResult.self, from: data) else {
             throw C2CClientError.commandFailed(result.error.isEmpty ? result.output : result.error)
@@ -134,10 +139,11 @@ struct C2CClient {
         return setup
     }
 
-    func gateway(_ action: String, input: Data? = nil) async throws -> Data {
-        let helper = try resource("Gateway/launcher.mjs")
+    func gateway(_ action: String, input: Data? = nil, sourceID: String? = nil) async throws -> Data {
+        let helper = try resource(sourceID == nil ? "Gateway/launcher.mjs" : "Gateway/side-lifecycle.mjs")
         let backend = URL(fileURLWithPath: cliPath).deletingLastPathComponent().deletingLastPathComponent().path
         var arguments = [action, backend]
+        if let sourceID { arguments.append(sourceID) }
         if let input, let json = String(data: input, encoding: .utf8) { arguments.append(json) }
         let result = try await run(arguments, entry: helper)
         guard let data = result.output.data(using: .utf8),
@@ -151,12 +157,22 @@ struct C2CClient {
     }
 
     func stop(_ workspace: WorkspaceRecord) async throws {
-        let result = try await run(["stop", "--workspace", workspace.path])
+        let result = try await sideLifecycle("stop", workspace)
         guard result.code == 0 else { throw C2CClientError.commandFailed(result.error.isEmpty ? result.output : result.error) }
     }
 
+    func decommission(_ workspace: WorkspaceRecord) async throws {
+        let result = try await sideLifecycle("decommission", workspace)
+        guard result.code == 0 else { throw C2CClientError.commandFailed(result.error.isEmpty ? result.output : result.error) }
+    }
+
+    private func sideLifecycle(_ action: String, _ workspace: WorkspaceRecord) async throws -> CommandResult {
+        let helper = try resource("Gateway/side-lifecycle.mjs")
+        return try await run([action, RuntimePaths.current.backend, workspace.id.uuidString.lowercased()], entry: helper)
+    }
+
     func pair(_ workspace: WorkspaceRecord) async throws -> PairingCode {
-        let result = try await run(["pair", "--workspace", workspace.path, "--json"])
+        let result = try await sideLifecycle("pair", workspace)
         guard result.code == 0,
               let data = result.output.data(using: .utf8),
               let response = try? JSONDecoder().decode(PairingResult.self, from: data),
@@ -167,7 +183,7 @@ struct C2CClient {
     }
 
     func unpair(_ workspace: WorkspaceRecord) async throws {
-        let result = try await run(["unpair", "--workspace", workspace.path])
+        let result = try await sideLifecycle("unpair", workspace)
         guard result.code == 0 else { throw C2CClientError.commandFailed(result.error.isEmpty ? result.output : result.error) }
     }
 }

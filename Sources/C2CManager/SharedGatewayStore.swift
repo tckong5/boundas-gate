@@ -150,7 +150,7 @@ final class SharedGatewayStore: ObservableObject {
     var automaticallyReconnects: Bool { status?.reconnectEnabled != false }
     var waitingToReconnect: Bool {
         statusConfirmed && status?.desiredRunning == true && automaticallyReconnects && !usable
-            && status?.state != "unknown" && status?.roots.isEmpty == false
+            && status?.state != "unknown"
     }
     var connectionTitle: String {
         if reconnecting { return "重新連線中…" }

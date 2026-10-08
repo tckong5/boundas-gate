@@ -25,7 +25,6 @@ struct SharedGatewayView: View {
                 VStack(alignment: .leading, spacing: 18) {
                     GroupBox {
                         VStack(alignment: .leading, spacing: 12) {
-                            if store.workspaces.isEmpty { Text("先加入 Folder，再揀要分享嘅資料夾。").foregroundStyle(.secondary) }
                             ForEach(store.workspaces) { workspace in
                                 Toggle(isOn: Binding(
                                     get: { selected.contains(workspace.id.uuidString.lowercased()) },
@@ -100,7 +99,7 @@ struct SharedGatewayView: View {
                                 }
                                 HStack {
                                     Button(gateway.pairing == nil ? "產生配對碼" : "重新產生") { Task { _ = await gateway.perform("pair") } }
-                                        .disabled(gateway.working || changed || saved.isEmpty)
+                                        .disabled(gateway.working || changed)
                                     if gateway.status?.addressConfirmed != true {
                                         Button("已完成設定") { Task { _ = await gateway.perform("confirm") } }.disabled(gateway.working)
                                     }
@@ -169,8 +168,7 @@ struct SharedGatewayView: View {
             HStack {
                 Button(primaryButtonTitle) { Task { await runPrimaryAction() } }
                     .buttonStyle(.borderedProminent)
-                    .disabled(gateway.working || gateway.checking
-                              || ([.stopped, .needsRepair].contains(gateway.connectionState) && selected.isEmpty))
+                    .disabled(gateway.working || gateway.checking)
                 if gateway.statusConfirmed && (gateway.status?.running == true || gateway.status?.desiredRunning == true) {
                     if gateway.status?.running == true && gateway.status?.state != "unknown" {
                         Button("重啟") { Task { await gateway.restart() } }
@@ -196,7 +194,7 @@ struct SharedGatewayView: View {
                             .buttonStyle(.borderedProminent)
                     } else {
                         Button("登入內置連線") { Task { _ = await gateway.perform("login") } }
-                            .disabled(gateway.working || saved.isEmpty)
+                            .disabled(gateway.working)
                     }
                     Button("登入後重新檢查") { Task { await gateway.refresh() } }
                         .disabled(gateway.working || gateway.checking)
@@ -207,7 +205,7 @@ struct SharedGatewayView: View {
                 set: { enabled in Task { await gateway.setAutomaticReconnect(enabled) } }
             ))
             .toggleStyle(.checkbox).font(.callout)
-            .disabled(gateway.working || !gateway.statusConfirmed || saved.isEmpty)
+            .disabled(gateway.working || !gateway.statusConfirmed)
             .help("App 運行時自動恢復已開啟嘅共用連線；手動停止後唔會自行開啟。")
             if !gateway.connectionHint.isEmpty {
                 Text(gateway.connectionHint).font(.caption).foregroundStyle(.secondary)
@@ -216,9 +214,6 @@ struct SharedGatewayView: View {
                 Button("套用新版授權") { Task { await gateway.restart() } }
                     .disabled(gateway.working || gateway.checking || changed)
                     .help("重啟共用服務，保留原有 Plugin 授權同固定地址。")
-            }
-            if selected.isEmpty && gateway.status != nil {
-                Text("先選擇下方 Folders，再開啟連線。").font(.caption).foregroundStyle(.secondary)
             }
             if let message = gateway.message {
                 Text(gateway.userFacingMessage ?? "").font(.caption).foregroundStyle(.orange)
@@ -258,7 +253,7 @@ struct SharedGatewayView: View {
             if gateway.status?.running == true && gateway.status?.accessCodeVersion != 1 {
                 Text("重新開啟共用連線，即可套用新版功能。").font(.callout)
                 Button("更新共用連線") { Task { await gateway.restart() } }
-                    .disabled(gateway.working || changed || saved.isEmpty)
+                    .disabled(gateway.working || changed)
             }
             ForEach(gateway.status?.roots ?? []) { root in
                 VStack(alignment: .leading, spacing: 8) {

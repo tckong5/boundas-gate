@@ -24,6 +24,15 @@ final class GatewayReconnectPolicyTests: XCTestCase {
         }
     }
 
+    func testZeroFoldersDoesNotBlockReconnect() {
+        var value = GatewayStatus(running: false, state: "stopped", reason: nil, gatewayID: "abcdef123456",
+            port: nil, pid: nil, publicUrl: nil, tunnel: nil, tokenCount: 0, pairingActive: false, roots: [],
+            configuredMCPURL: nil, accessCodeVersion: 1, folderAccess: [])
+        value.desiredRunning = true; value.reconnectEnabled = true
+        var policy = GatewayReconnectPolicy()
+        XCTAssertTrue(policy.shouldAttempt(status: value, usable: false, confirmed: true, busy: false))
+    }
+
     func testManualStopAndDisabledRecoveryNeverAutoStart() {
         for value in [status(running: false, state: "stopped", desired: false), status(enabled: false)] {
             var policy = GatewayReconnectPolicy()

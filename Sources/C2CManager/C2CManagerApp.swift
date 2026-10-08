@@ -76,7 +76,7 @@ private struct MenuBarContent: View {
             }
         }
         .disabled(gateway.working || gateway.checking
-                  || ([.stopped, .needsRepair].contains(gateway.connectionState) && gateway.status?.roots.isEmpty != false))
+                  )
         if gateway.statusConfirmed && (gateway.status?.running == true || gateway.status?.desiredRunning == true) {
             if gateway.status?.running == true && gateway.status?.state != "unknown" {
                 Button("重啟共用連線") {

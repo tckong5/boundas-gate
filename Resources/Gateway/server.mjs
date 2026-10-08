@@ -121,8 +121,7 @@ export function makeMcpServer(backend, registry, access = new FolderAccess(regis
 export async function startGateway({ backendRoot, registry = new Registry(), tunnelProvider, persistRuntime = true, port = 0,
   instanceID = randomBytes(32).toString('hex'), runtimePath, authFile, service = 'boundas-gateway', sideRoot }) {
   const backend = await loadBackend(backendRoot);
-  const config = registry.read();
-  if (!config || !registry.active().length) throw new Error('請先揀至少一個要共用嘅 Folder。');
+  const config = registry.ensure();
   const connection = registry.connection();
   const expectedURL = connection.stableMCPURL?.replace(/\/mcp$/, '') ?? null;
   const provider = tunnelProvider ?? gatewayProvider(registry, { expectedURL });
@@ -206,7 +205,6 @@ export async function startGateway({ backendRoot, registry = new Registry(), tun
   });
   app.post('/control/pair', admin, (_req, res) => {
     const roots = registry.active();
-    if (!roots.length) { res.status(409).json({ message: '冇已選取嘅 Folder。' }); return; }
     const session = pairing.create();
     res.json({ ok: true, pairingCode: session.code, expiresAt: session.expiresAt, roots: roots.map(root => ({ id: root.id, name: root.name })) });
   });

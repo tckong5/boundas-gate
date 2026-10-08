@@ -490,6 +490,31 @@ test('new launcher refuses to enable code protection on an older running daemon'
   } finally { fake.closeAllConnections(); await new Promise(resolve => fake.close(resolve)); f.clean(); }
 });
 
+test('zero Folder Main Gate starts, pairs, reconnects and keeps authorization after last Folder removal', async () => {
+  const f = fixture(); f.registry.ensure(); let gateway = await server(f);
+  try {
+    const originalID = f.registry.read().id;
+    const tokens = await authorize(gateway, await pair(gateway));
+    assert.deepEqual(data(await rpc(gateway, tokens.access_token, 'list_workspaces')).workspaces, []);
+    f.select(0);
+    assert.equal(data(await read(gateway, tokens, f.roots[0].c2cID)).content, 'A read test');
+    secureWrite(f.allowlistFile, []); // Removing the last added Folder revokes access, never the Gate.
+    assert.deepEqual(data(await rpc(gateway, tokens.access_token, 'list_workspaces')).workspaces, []);
+    assert.equal((await read(gateway, tokens, f.roots[0].c2cID)).isError, true);
+    assert.equal((await fetch(`${gateway.localBase()}/health`)).status, 200);
+    assert.equal(gateway.provider.status().running, true);
+    f.registry.configure([], backend.Workspace);
+    await gateway.close(); gateway = await server(f);
+    assert.equal(f.registry.read().id, originalID);
+    assert.deepEqual(data(await rpc(gateway, tokens.access_token, 'list_workspaces')).workspaces, []);
+    assert.equal(gateway.authStore.refresh(tokens.refresh_token, tokens.client_id).ok, true);
+    assert.equal((await control(gateway, '/control/tunnel/start')).status, 200);
+    const newTokens = await authorize(gateway, await pair(gateway));
+    assert.deepEqual(data(await rpc(gateway, newTokens.access_token, 'list_workspaces')).workspaces, []);
+  } finally { await gateway.close(); f.clean(); }
+});
+
+
 test('real Main and Side Gates enforce separate OAuth, decommission, re-add and Folder passcode policy', async () => {
   const f = fixture(); f.select(0, 1);
   f.roots[0].sideGateAdded = true; f.roots[1].sideGateAdded = true;

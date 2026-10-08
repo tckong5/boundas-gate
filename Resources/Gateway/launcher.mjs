@@ -70,13 +70,14 @@ try {
   } else if (action === 'status') { output(await status()); }
   else if (action === 'login') {
     if (transportMode(registry) !== 'embedded') throw new Error('現有連線沿用原本嘅 Tailscale 裝置，未有轉換地址。');
+    await withLock(registry.directory, async () => registry.ensure());
     await gatewaySetup(registry, { start: true });
     output(await status());
   }
   else if (action === 'connection-settings') {
     const body = JSON.parse(input);
     if (typeof body.enabled !== 'boolean') throw new Error('自動重連設定無效。');
-    await withLock(registry.directory, async () => registry.updateConnection({ reconnectEnabled: body.enabled }));
+    await withLock(registry.directory, async () => { registry.ensure(); registry.updateConnection({ reconnectEnabled: body.enabled }); });
     output(await status());
   }
   else if (action === 'remember-running') {
@@ -87,9 +88,15 @@ try {
     output(await status());
   }
   else if (['start', 'reconnect', 'recover'].includes(action)) {
+    await withLock(registry.directory, async () => registry.ensure());
+    if (action === 'recover') {
+      const connection = registry.connection();
+      const current = await observation();
+      if (!connection.reconnectEnabled || connection.desiredRunning === false
+          || (connection.desiredRunning === null && current.state !== 'healthy')) throw new Error('Gate 已由用戶停止，未有自動開啟。');
+    }
     const setup = await gatewaySetup(registry, { start: true });
     if (setup.state !== 'ready') throw new Error(setup.message);
-    if (!registry.active().length) throw new Error('請先揀至少一個要共用嘅 Folder。');
     await withLock(registry.directory, async () => {
       let current = await observation();
       if (current.state === 'unknown') throw new Error(current.reason);

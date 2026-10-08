@@ -16,7 +16,7 @@ struct GatewayReconnectPolicy {
             reset()
             return false
         }
-        guard !busy, status.state != "unknown", status.running != nil, !status.roots.isEmpty else { return false }
+        guard !busy, status.state != "unknown", status.running != nil else { return false }
         if let current = EndpointAddress.mcpURL(status.publicUrl ?? status.tunnel?.url),
            let expected = EndpointAddress.mcpURL(status.stableMCPURL ?? status.configuredMCPURL), current != expected {
             return false

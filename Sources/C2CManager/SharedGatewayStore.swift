@@ -50,6 +50,8 @@ struct GatewayFolderCode: Decodable {
 }
 
 struct GatewayAIConnection: Decodable, Identifiable, Equatable {
+    var pairingSessionID: String? = nil
+    var authorizationSessionID: String? = nil
     let clientID: String
     let name: String
     let authorizationState: String
@@ -73,7 +75,12 @@ struct GatewayAIConnection: Decodable, Identifiable, Equatable {
 }
 
 struct GatewayStatus: Decodable {
+    var setupManagementVersion: Int? = nil
     var clientManagementVersion: Int? = nil
+    var clientRevocationVersion: Int? = nil
+    var sharedTunnel: Bool? = nil
+    var sharedMigrationAvailable: Bool? = nil
+    var endpointMigrationPending: Bool? = nil
     let running: Bool?
     let state: String
     let reason: String?
@@ -90,6 +97,7 @@ struct GatewayStatus: Decodable {
     let folderAccess: [GatewayFolderAccess]?
     var stableMCPURL: String? = nil
     var desiredRunning: Bool? = nil
+    var localOnly: Bool? = nil
     var reconnectEnabled: Bool? = nil
     var connectionVersion: Int? = nil
     var connectionRemembered: Bool? = nil
@@ -110,6 +118,7 @@ struct GatewayStatus: Decodable {
 }
 
 struct GatewayPairing: Decodable {
+    var sessionID: String? = nil
     struct Root: Decodable { let id: String; let name: String }
     let pairingCode: String
     let expiresAt: Double

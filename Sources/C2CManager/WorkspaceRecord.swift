@@ -9,12 +9,17 @@ struct WorkspaceRecord: Codable, Identifiable, Hashable {
     var previousMCPURL: String?
     var configuredMCPURL: String?
     var connectionProvider: ConnectionProvider?
+    var mainGateAdded: Bool?
     var sideGateAdded: Bool?
+    var mainGateOrder: Int?
+    var sideGateOrder: Int?
     var sideGateRemovalState: SideGateRemovalState?
     var sideGateRemovalError: String?
     var lastKnownMCPURL: String?
 
     var provider: ConnectionProvider { connectionProvider ?? .cloudflare }
+    // Existing records retain their previous Main Gate membership.
+    var belongsToMainGate: Bool { mainGateAdded != false }
     var belongsToSideGates: Bool {
         sideGateAdded == true
     }
@@ -92,6 +97,7 @@ struct PairingCode: Equatable {
 }
 
 enum WorkspaceOperation: String {
+    case move = "Moving…"
     case remove = "Removing…"
     case start = "啟動中"
     case stop = "停止中"

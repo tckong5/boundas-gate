@@ -1,5 +1,9 @@
 # Boundas Gate — Product Model / Architecture Invariants v1
 
+下一版已確認嘅 Tunnel ownership 目標見
+[Shared Tunnel 架構目標](shared-tunnel-architecture-target.md)。該文件記錄共享登入／
+transport 同獨立 Gate routing 嘅新方向；現有 runtime 尚未完成該重構。
+
 ## Core invariants
 
 > A Gate can exist with zero Folders.

@@ -64,6 +64,28 @@ test('first-run login, startup, pairing, reconnect and crash recovery need zero 
     assert.equal((await launch('stop')).running, false);
     const restarted = await launch('start');
     assert.equal(restarted.gatewayID, id); assert.equal(restarted.running, true);
+    const authFile = path.join(registry.directory, 'auth.json');
+    const { AuthStore } = await loadBackend(backendRoot);
+    const auth = new AuthStore(id, { file: authFile });
+    const client = auth.registerClient({ clientName: 'Test AI', redirectUris: ['https://example.test/callback'] });
+    const token = auth.issueTokens({ clientId: client.clientId, scopes: ['workspace.read', 'offline_access', `bg.instance.${id}`] });
+    const authBefore = fs.readFileSync(authFile, 'utf8');
+    const urlBefore = registry.connection().stableMCPURL;
+    const signedOut = await launch('logout');
+    assert.equal(signedOut.running, false); assert.equal(signedOut.desiredRunning, false);
+    assert.equal(signedOut.transportSetup.state, 'login');
+    assert.equal(registry.read().id, id); assert.equal(registry.connection().stableMCPURL, urlBefore);
+    assert.equal(fs.readFileSync(authFile, 'utf8'), authBefore);
+    await assert.rejects(launch('recover'));
+    assert.deepEqual(accountCalls, ['logout']); // Recovery must not silently log the user back in.
+    assert.equal((await launch('login')).transportSetup.state, 'ready');
+    const reopened = await launch('start');
+    assert.equal(reopened.gatewayID, id);
+    const access = await fetch(`http://127.0.0.1:${reopened.port}/mcp`, { method: 'POST',
+      headers: { Authorization: `Bearer ${token.accessToken}`, 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'list_workspaces', arguments: {} } }) });
+    assert.equal(access.status, 200); // The same authorization works after logout/login.
+    assert.equal(new AuthStore(id, { file: authFile }).verifyAccessToken(token.accessToken).ok, true);
   } finally {
     try { await launch('stop'); } catch {}
     ipc.closeAllConnections(); await new Promise(resolve => ipc.close(resolve));

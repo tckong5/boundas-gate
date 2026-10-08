@@ -34,18 +34,19 @@ type statusData struct {
 	userspace, funnelAllowed, httpsEnabled bool
 }
 type statusReply struct {
-	OK          bool   `json:"ok"`
-	Service     string `json:"service"`
-	ID          string `json:"gatewayID"`
-	State       string `json:"state"`
-	Message     string `json:"message"`
-	Hostname    string `json:"hostname,omitempty"`
-	LoginURL    string `json:"loginURL,omitempty"`
-	ApprovalURL string `json:"approvalURL,omitempty"`
-	Running     bool   `json:"running"`
-	Userspace   bool   `json:"userspace"`
-	PublicURL   string `json:"publicUrl,omitempty"`
-	PID         int    `json:"pid"`
+	AccountManagementVersion int    `json:"accountManagementVersion"`
+	OK                       bool   `json:"ok"`
+	Service                  string `json:"service"`
+	ID                       string `json:"gatewayID"`
+	State                    string `json:"state"`
+	Message                  string `json:"message"`
+	Hostname                 string `json:"hostname,omitempty"`
+	LoginURL                 string `json:"loginURL,omitempty"`
+	ApprovalURL              string `json:"approvalURL,omitempty"`
+	Running                  bool   `json:"running"`
+	Userspace                bool   `json:"userspace"`
+	PublicURL                string `json:"publicUrl,omitempty"`
+	PID                      int    `json:"pid"`
 }
 type agent struct {
 	id          string
@@ -61,10 +62,12 @@ type agent struct {
 	// Unit tests use a local status provider; production always uses tsnet.
 	statusSource func(context.Context) (*statusData, error)
 	listen       func() (net.Listener, error)
+	login        func(context.Context) error
+	logout       func(context.Context) error
 }
 
 func (a *agent) status(ctx context.Context) statusReply {
-	reply := statusReply{OK: true, Service: "boundas-tsnet", ID: a.id, PID: os.Getpid()}
+	reply := statusReply{OK: true, Service: "boundas-tsnet", ID: a.id, PID: os.Getpid(), AccountManagementVersion: 1}
 	data, err := a.statusSource(ctx)
 	if err != nil {
 		reply.State = "starting"
@@ -184,15 +187,27 @@ func (a *agent) control(w http.ResponseWriter, r *http.Request) {
 		replyJSON(w, 200, a.status(ctx))
 		return
 	}
-	if r.URL.Path == "/login" && r.Method == http.MethodPost {
+	if (r.URL.Path == "/login" || r.URL.Path == "/logout") && r.Method == http.MethodPost {
+		a.op.Lock()
+		defer a.op.Unlock()
 		ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 		defer cancel()
-		if a.client == nil {
+		action := a.login
+		if r.URL.Path == "/logout" {
+			action = a.logout
+		}
+		if action == nil {
 			http.NotFound(w, r)
 			return
 		}
-		if err := a.client.StartLoginInteractive(ctx); err != nil {
-			replyJSON(w, 409, map[string]any{"ok": false, "message": "未能開啟登入頁，請稍後再試。"})
+		if r.URL.Path == "/logout" {
+			a.stop()
+			a.mu.Lock()
+			a.approvalURL = ""
+			a.mu.Unlock()
+		}
+		if err := action(ctx); err != nil {
+			replyJSON(w, 409, map[string]any{"ok": false, "message": "未能完成 Tunnel 登入／登出，請稍後再試。"})
 			return
 		}
 		replyJSON(w, 200, a.status(ctx))
@@ -330,6 +345,8 @@ func serve(directory, id string) error {
 		return err
 	}
 	a := &agent{id: id, node: node, client: client}
+	a.login = client.StartLoginInteractive
+	a.logout = client.Logout
 	a.statusSource = func(ctx context.Context) (*statusData, error) {
 		st, e := client.Status(ctx)
 		if e != nil {
@@ -360,13 +377,73 @@ func serve(directory, id string) error {
 	}
 	return err
 }
+
+// Manage the existing Mac device without creating a new login profile or
+// altering its routing/DNS preferences. No account credentials leave LocalAPI.
+func externalAuth(action string) error {
+	if action != "login" && action != "logout" {
+		return errors.New("Invalid Tunnel action")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	client := &local.Client{}
+	if action == "logout" {
+		if err := client.Logout(ctx); err != nil {
+			return err
+		}
+	} else {
+		st, err := client.Status(ctx)
+		if err != nil {
+			return err
+		}
+		if st.BackendState == "Stopped" {
+			if _, err = client.EditPrefs(ctx, &ipn.MaskedPrefs{Prefs: ipn.Prefs{WantRunning: true}, WantRunningSet: true}); err != nil {
+				return err
+			}
+		} else if st.BackendState == "NeedsLogin" || st.BackendState == "NoState" {
+			if err = client.StartLoginInteractive(ctx); err != nil {
+				return err
+			}
+		}
+	}
+	for attempt := 0; attempt < 30; attempt++ {
+		st, err := client.Status(ctx)
+		if err != nil {
+			return err
+		}
+		result := map[string]any{"ok": true, "state": "login", "message": "請完成 Tunnel 登入，再重新檢查。"}
+		if st.BackendState == "Running" {
+			result["state"] = "ready"
+			result["message"] = "Tunnel 已登入。"
+		}
+		if u, e := url.Parse(st.AuthURL); e == nil && u.Scheme == "https" && u.Host == "login.tailscale.com" && u.User == nil {
+			result["loginURL"] = u.String()
+		}
+		if st.BackendState == "NeedsMachineAuth" {
+			result["approvalURL"] = "https://login.tailscale.com/admin/machines"
+		}
+		if action == "logout" || result["state"] == "ready" || result["loginURL"] != nil || result["approvalURL"] != nil || attempt == 29 {
+			return json.NewEncoder(os.Stdout).Encode(result)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return nil
+}
 func main() {
 	directory := flag.String("state-dir", "", "Private state directory")
 	id := flag.String("gateway-id", "", "Gateway identity")
 	version := flag.Bool("version", false, "Version information")
+	external := flag.String("external-auth", "", "Manage the existing Mac Tunnel login")
 	flag.Parse()
 	if *version {
 		fmt.Println("boundas-tsnet 1.2.0 / tailscale 1.104.0")
+		return
+	}
+	if *external != "" {
+		if err := externalAuth(*external); err != nil {
+			_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"ok": false, "message": "未能連接外置 Tailscale，請開啟 Tailscale 後重試。"})
+			os.Exit(1)
+		}
 		return
 	}
 	if err := serve(*directory, *id); err != nil {

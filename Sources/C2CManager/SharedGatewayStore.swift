@@ -253,7 +253,7 @@ final class SharedGatewayStore: ObservableObject {
     @discardableResult
     func perform(_ action: String, selectedIDs: [String]? = nil, sourceID: String? = nil,
                  workspaceID: String? = nil, codeRequired: Bool? = nil, reconnectEnabled: Bool? = nil,
-                 clientID: String? = nil) async -> Bool {
+                 clientID: String? = nil, confirmedExternal: Bool? = nil) async -> Bool {
         guard !working else { return false }
         working = true
         revision += 1
@@ -262,7 +262,8 @@ final class SharedGatewayStore: ObservableObject {
         defer { working = false }
         do {
             let input: Data?
-            if let clientID { input = try JSONEncoder().encode(["clientID": clientID]) }
+            if let confirmedExternal { input = try JSONEncoder().encode(["confirmedExternal": confirmedExternal]) }
+            else if let clientID { input = try JSONEncoder().encode(["clientID": clientID]) }
             else if let reconnectEnabled { input = try JSONEncoder().encode(["enabled": reconnectEnabled]) }
             else if let workspaceID {
                 struct FolderInput: Encodable { let workspaceID: String; let required: Bool? }
@@ -274,23 +275,29 @@ final class SharedGatewayStore: ObservableObject {
             else { input = nil }
             let response = try await client.gateway(action, input: input, sourceID: gateSourceID)
             if action == "pair" { pairing = try JSONDecoder().decode(GatewayPairing.self, from: response) }
-            else if ["configure", "remove-root", "stop", "revoke"].contains(action) { pairing = nil }
+            else if ["configure", "remove-root", "stop", "logout", "revoke"].contains(action) { pairing = nil }
             if action == "folder-code" {
                 let code = try JSONDecoder().decode(GatewayFolderCode.self, from: response)
                 folderCodes[code.workspaceID] = code
             } else if ["code-policy", "lock-folder"].contains(action), let workspaceID {
                 folderCodes[workspaceID] = nil
-            } else if ["stop", "revoke"].contains(action) { folderCodes.removeAll() }
+            } else if ["stop", "logout", "revoke"].contains(action) { folderCodes.removeAll() }
+            let loginSetup = action == "login" ? try JSONDecoder().decode(GatewayStatus.self, from: response).transportSetup : nil
             await refresh()
+            if let loginSetup { status?.transportSetup = loginSetup }
             if ["start", "reconnect", "recover"].contains(action) {
                 for _ in 0..<3 where !usable {
                     try await Task.sleep(for: .seconds(3))
                     await refresh()
                 }
                 if !usable {
-                    message = status?.transport == "embedded"
-                        ? "暫時未能連線。請完成內置連線登入及授權，再重新檢查；原有 ChatGPT 設定同授權會保留。"
-                        : "暫時未能連線。請確認 Tailscale 已連線；原有 ChatGPT 設定同授權會保留。"
+                    if status?.transport == "embedded" {
+                        message = status?.transportSetup?.state == "ready"
+                            ? "內置裝置已登入，但公開地址暫時未通。請重新檢查；原有設定同授權會保留。"
+                            : "暫時未能連線。請完成內置連線登入及授權，再重新檢查；原有 ChatGPT 設定同授權會保留。"
+                    } else {
+                        message = "暫時未能連線。請確認 Tailscale 已連線；原有 ChatGPT 設定同授權會保留。"
+                    }
                 }
             }
             return true
@@ -330,6 +337,11 @@ final class SharedGatewayStore: ObservableObject {
         reconnecting = true
         defer { reconnecting = false }
         _ = await perform("recover")
+    }
+
+    func signInTunnel() async {
+        guard await perform("login") else { return }
+        if let url = status?.transportSetup?.actionURL { NSWorkspace.shared.open(url) }
     }
 
     func copyURL(openChatGPT: Bool = false) {

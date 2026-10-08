@@ -30,7 +30,15 @@ export async function preflight(binary = findBinary(), run = command) {
   if (!binary) return { state: 'missing', message: '先安裝 Tailscale，再開啟並登入。' };
   try {
     const status = JSON.parse(await run(binary, ['status', '--json']));
-    if (status.BackendState !== 'Running') return { state: 'login', message: '請開啟 Tailscale，登入並連線，再返嚟重新檢查。' };
+    if (status.BackendState !== 'Running') {
+      const setup = { state: 'login', message: '請登入／連線 Tunnel，再重新檢查。' };
+      try {
+        const url = new URL(status.AuthURL);
+        if (url.protocol === 'https:' && url.hostname === 'login.tailscale.com' && !url.username && !url.password) setup.loginURL = url.href;
+      } catch {}
+      if (status.BackendState === 'NeedsMachineAuth') setup.approvalURL = 'https://login.tailscale.com/admin/machines';
+      return setup;
+    }
     const hostname = status.Self?.DNSName?.replace(/\.$/, '').toLowerCase();
     if (!hostname || !/^[a-z0-9-]+(?:\.[a-z0-9-]+)+\.ts\.net$/.test(hostname)) {
       return { state: 'blocked', message: 'Tailscale 未提供 HTTPS 主機名稱。請先啟用 MagicDNS。' };

@@ -41,6 +41,12 @@ test('preflight handles missing installation, login and MagicDNS', async () => {
   assert.equal((await preflight('/fake', async () => '{"BackendState":"Running","Self":{"DNSName":"bad/path.ts.net"}}')).state, 'blocked');
   assert.equal((await preflight('/fake', async () => JSON.stringify({ BackendState: 'Running', Self: { DNSName: `${hostname}.` } }))).hostname, hostname);
 });
+test('external login status exposes only a trusted authorization URL', async () => {
+  for (const url of ['https://login.tailscale.com/a/example', 'https://evil.example/a', 'http://login.tailscale.com/a', 'https://user:secret@login.tailscale.com/a']) {
+    const setup = await preflight('/fake', async () => JSON.stringify({ BackendState: 'NeedsLogin', AuthURL: url }));
+    assert.equal(setup.loginURL, url === 'https://login.tailscale.com/a/example' ? url : undefined);
+  }
+});
 test('public proxy routes block admin, path traversal and missing private route secret', () => {
   const secret = 'private';
   for (const raw of ['/mcp', '/private/bridge/admin/info', '/private/bridge/%61dmin/info', '/private/bridge/mcp/../admin/info', '/private/bridge//mcp', '/private/issuer/admin/info']) {

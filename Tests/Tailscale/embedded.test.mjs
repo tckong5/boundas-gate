@@ -5,13 +5,66 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { Registry, secureWrite } from '../../Resources/Gateway/registry.mjs';
-import { transportMode, EmbeddedProvider, embeddedLocation, embeddedRequest, embeddedSetup } from '../../Resources/Tailscale/embedded.mjs';
+import { transportMode, EmbeddedProvider, embeddedLocation, embeddedRequest, embeddedSetup, tunnelAccount } from '../../Resources/Tailscale/embedded.mjs';
 function fixture() {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'boundas-mode-'));
   const registry = new Registry({ directory });
   secureWrite(path.join(directory, 'config.json'), { id: 'abcdef123456', roots: [] });
   return { registry, clean: () => fs.rmSync(directory, { recursive: true, force: true }) };
 }
+test('external account actions retain the Mac profile and require explicit shared-device logout confirmation', async () => {
+  const f = fixture(); const calls = [];
+  const url = 'https://old.example.ts.net/c2c/abcdef123456/mcp';
+  f.registry.updateConnection({ stableMCPURL: url });
+  const run = async (_, args) => { calls.push(args); return JSON.stringify({ ok: true, state: 'login', loginURL: 'https://login.tailscale.com/a/test' }); };
+  try {
+    await assert.rejects(tunnelAccount(f.registry, 'logout', { binary: '/helper', run }), /先確認/);
+    assert.deepEqual(calls, []);
+    assert.equal((await tunnelAccount(f.registry, 'login', { binary: '/helper', run })).state, 'login');
+    await tunnelAccount(f.registry, 'logout', { binary: '/helper', run, confirmedExternal: true });
+    assert.deepEqual(calls, [['--external-auth', 'login'], ['--external-auth', 'logout']]);
+    assert.equal(f.registry.connection().stableMCPURL, url);
+    assert.equal(transportMode(f.registry, '/helper'), 'external');
+  } finally { f.clean(); }
+});
+test('embedded logout never starts an interactive login and retains the Gate configuration', async () => {
+  const f = fixture(); const location = embeddedLocation(f.registry); let server;
+  const calls = [];
+  try {
+    secureWrite(path.join(f.registry.directory, 'config.json'), { ...f.registry.read(), transport: 'embedded' });
+    const original = f.registry.read();
+    fs.mkdirSync(location.controlDirectory, { mode: 0o700 });
+    server = http.createServer((req, res) => {
+      calls.push(req.url);
+      res.end(JSON.stringify({ ok: true, service: 'boundas-tsnet', gatewayID: original.id, state: 'login', userspace: true, accountManagementVersion: 1 }));
+    });
+    await new Promise(resolve => server.listen(location.socket, resolve)); fs.chmodSync(location.socket, 0o600);
+    await tunnelAccount(f.registry, 'logout', { binary: '/helper' });
+    assert.deepEqual(calls, ['/status', '/logout']);
+    assert.deepEqual(f.registry.read(), original);
+  } finally {
+    if (server) await new Promise(resolve => server.close(resolve));
+    fs.rmSync(location.controlDirectory, { recursive: true, force: true }); f.clean();
+  }
+});
+test('an old helper without a verifiable process identity cannot be replaced', async () => {
+  const f = fixture(); const location = embeddedLocation(f.registry); let server;
+  const calls = [];
+  try {
+    secureWrite(path.join(f.registry.directory, 'config.json'), { ...f.registry.read(), transport: 'embedded' });
+    fs.mkdirSync(location.controlDirectory, { mode: 0o700 });
+    server = http.createServer((req, res) => {
+      calls.push(req.url);
+      res.end(JSON.stringify({ ok: true, service: 'boundas-tsnet', gatewayID: f.registry.read().id, state: 'ready' }));
+    });
+    await new Promise(resolve => server.listen(location.socket, resolve)); fs.chmodSync(location.socket, 0o600);
+    await assert.rejects(tunnelAccount(f.registry, 'logout', { binary: '/helper' }), /未能確認舊 Tunnel/);
+    assert.deepEqual(calls, ['/status']);
+  } finally {
+    if (server) await new Promise(resolve => server.close(resolve));
+    fs.rmSync(location.controlDirectory, { recursive: true, force: true }); f.clean();
+  }
+});
 test('new packaged installations use embedded mode; existing fixed URLs retain their device identity', () => {
   const f = fixture();
   try {

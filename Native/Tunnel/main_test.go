@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -12,6 +13,55 @@ import (
 )
 
 const testID = "abcdef123456"
+
+func TestLogoutStopsRouteBeforeAccountLogoutAndPreservesGateIdentity(t *testing.T) {
+	a := readyAgent()
+	a.running = true
+	a.publicURL = "https://boundas.example.ts.net/c2c/" + testID
+	a.approvalURL = "https://login.tailscale.com/a/old"
+	called := false
+	a.logout = func(context.Context) error {
+		called = true
+		if a.running || a.publicURL != "" {
+			t.Fatal("route still active when logging out")
+		}
+		a.statusSource = func(context.Context) (*statusData, error) {
+			return &statusData{state: "NeedsLogin", userspace: true}, nil
+		}
+		return nil
+	}
+	out := httptest.NewRecorder()
+	a.control(out, httptest.NewRequest("POST", "http://localhost/logout", nil))
+	var reply statusReply
+	if err := json.Unmarshal(out.Body.Bytes(), &reply); err != nil {
+		t.Fatal(err)
+	}
+	if !called || out.Code != 200 || reply.State != "login" || reply.Running || reply.ID != testID || a.approvalURL != "" {
+		t.Fatal("logout did not safely close own Gate transport")
+	}
+	out = httptest.NewRecorder()
+	a.control(out, httptest.NewRequest("GET", "http://localhost/logout", nil))
+	if out.Code != 404 {
+		t.Fatal("GET must not mutate account")
+	}
+}
+
+func TestFailedLogoutLeavesRouteClosedAndCanRetry(t *testing.T) {
+	a := readyAgent()
+	a.running = true
+	a.logout = func(context.Context) error { return errors.New("private credential failure") }
+	out := httptest.NewRecorder()
+	a.control(out, httptest.NewRequest("POST", "http://localhost/logout", nil))
+	if out.Code != 409 || a.running || strings.Contains(out.Body.String(), "private credential") {
+		t.Fatal("unsafe failed logout")
+	}
+	a.logout = func(context.Context) error { return nil }
+	out = httptest.NewRecorder()
+	a.control(out, httptest.NewRequest("POST", "http://localhost/logout", nil))
+	if out.Code != 200 {
+		t.Fatal("logout retry failed")
+	}
+}
 
 func readyAgent() *agent {
 	return &agent{id: testID, statusSource: func(context.Context) (*statusData, error) {

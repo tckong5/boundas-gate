@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { Registry, secureWrite } from './registry.mjs';
 import { loadBackend, startGateway } from './server.mjs';
 import { withLock } from '../Tailscale/provider.mjs';
-import { gatewaySetup, transportMode } from '../Tailscale/embedded.mjs';
+import { gatewaySetup, transportMode, tunnelAccount } from '../Tailscale/embedded.mjs';
 import { readRuntime, observeRuntime } from './runtime-instance.mjs';
 
 const [action, backendRoot, input] = process.argv.slice(2);
@@ -26,12 +26,25 @@ async function observation() {
   return observeRuntime(runtimeFile, { gateID: registry.read()?.id, service: 'boundas-gateway',
     entrypoint: fileURLToPath(import.meta.url), getInfo: state => control(state, '/control/info', 'GET', 3000) });
 }
+async function stopGate() {
+  await withLock(registry.directory, async () => {
+    const current = await observation();
+    if (registry.read()) registry.updateConnection({ desiredRunning: false });
+    if (current.state === 'unknown') throw new Error(current.reason);
+    if (current.state === 'healthy') {
+      await control(current.runtime, '/control/shutdown');
+      const deadline = Date.now() + 20000;
+      while (runtime() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 250));
+      if (runtime()) throw new Error('Gate 仍在停止中，請稍後再檢查。');
+    }
+  });
+}
 async function status() {
   const config = registry.read();
   const observed = await observation();
   const connection = registry.connection();
   const transport = transportMode(registry);
-  const transportSetup = config && transport === 'embedded' ? await gatewaySetup(registry) : undefined;
+  const transportSetup = config ? await gatewaySetup(registry) : undefined;
   return { ok: true, running: observed.state === 'unknown' ? null : observed.state === 'healthy', state: observed.state, reason: observed.reason,
     publicUrl: connection.stableMCPURL?.replace(/\/mcp$/, ''), ...observed.info, ...connection,
     desiredRunning: connection.desiredRunning ?? observed.state === 'healthy',
@@ -76,9 +89,15 @@ try {
     });
   } else if (action === 'status') { output(await status()); }
   else if (action === 'login') {
-    if (transportMode(registry) !== 'embedded') throw new Error('現有連線沿用原本嘅 Tailscale 裝置，未有轉換地址。');
     await withLock(registry.directory, async () => registry.ensure());
-    await gatewaySetup(registry, { start: true });
+    const setup = await tunnelAccount(registry, 'login');
+    output({ ...await status(), transportSetup: setup });
+  }
+  else if (action === 'logout') {
+    const confirmedExternal = input ? JSON.parse(input).confirmedExternal === true : false;
+    if (transportMode(registry) === 'external' && !confirmedExternal) throw new Error('外置 Tunnel 登出會影響同一 Mac 裝置嘅其他連線，請先確認。');
+    await stopGate();
+    await tunnelAccount(registry, 'logout', { confirmedExternal });
     output(await status());
   }
   else if (action === 'connection-settings') {
@@ -138,17 +157,7 @@ try {
     });
     output(await status());
   } else if (action === 'stop') {
-    await withLock(registry.directory, async () => {
-      const current = await observation();
-      if (registry.read()) registry.updateConnection({ desiredRunning: false });
-      if (current.state === 'unknown') throw new Error(current.reason);
-      if (current.state === 'healthy') {
-        await control(current.runtime, '/control/shutdown');
-        const deadline = Date.now() + 20000;
-        while (runtime() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 250));
-        if (runtime()) throw new Error('共用連線仍在停止中，請稍後再檢查。');
-      }
-    });
+    await stopGate();
     output(await status());
   } else if (['pair', 'revoke'].includes(action)) {
     const current = await observation();

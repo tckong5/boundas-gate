@@ -9,6 +9,7 @@ struct SharedGatewayView: View {
     @State private var confirmRevoke = false
     @State private var testCopied = false
     @State private var showPairing = false
+    @State private var showTunnelManagement = false
 
     private var saved: Set<String> { Set((gateway.status?.roots ?? []).map { $0.sourceID.lowercased() }) }
     private var changed: Bool { selected != saved }
@@ -64,6 +65,8 @@ struct SharedGatewayView: View {
                     }
                     DisclosureGroup("連線詳細資料") {
                         VStack(alignment: .leading, spacing: 10) {
+            Button("Manage Tunnel…") { showTunnelManagement = true }
+                .buttonStyle(.borderless).controlSize(.small)
                             if let url = gateway.status?.mcpURL {
                                 Text(url).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
                             }
@@ -127,6 +130,9 @@ struct SharedGatewayView: View {
             }
         }
         .navigationTitle("共用 ChatGPT 連線")
+        .sheet(isPresented: $showTunnelManagement) {
+            TunnelManagementView(gateway: gateway)
+        }
         .onAppear {
             syncSelection()
             showPairing = gateway.status?.tokenCount == 0 || gateway.pairing != nil

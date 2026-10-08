@@ -5,7 +5,7 @@ import os from 'node:os';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { setupCheck, TailscaleProvider, withLock } from './provider.mjs';
+import { setupCheck, TailscaleProvider, withLock, command } from './provider.mjs';
 
 export function embeddedBinary() {
   const candidate = path.join(path.dirname(fileURLToPath(import.meta.url)), '../Runtime/bin/boundas-tunnel');
@@ -49,8 +49,8 @@ export async function embeddedRequest(registry, route, body, timeout = 6000) {
     request.on('error', reject); request.end(body ? JSON.stringify(body) : undefined);
   });
 }
-export async function embeddedSetup(registry, { start = false, binary = embeddedBinary() } = {}) {
-  if (!registry.read()) return { state: 'unconfigured', message: '先揀 Folder 並儲存分享清單。' };
+export async function embeddedSetup(registry, { start = false, requestLogin = true, binary = embeddedBinary() } = {}) {
+  if (!registry.read()) return { state: 'unconfigured', message: '開啟 Main Gate，開始設定 Tunnel。' };
   if (!binary) return { state: 'missing', message: '安裝包缺少內置連線元件，請重新安裝 Boundas Gate。' };
   let status;
   try { status = await embeddedRequest(registry, '/status'); }
@@ -78,7 +78,7 @@ export async function embeddedSetup(registry, { start = false, binary = embedded
     });
     status = await embeddedRequest(registry, '/status');
   }
-  if (!start) return status;
+  if (!start || !requestLogin) return status;
   let requestedLogin = false;
   for (let attempt = 0; attempt < 40 && ['starting', 'login'].includes(status.state) && !status.loginURL && !status.approvalURL; attempt++) {
     // Startup may report "starting" before the node enters NeedsLogin. Request
@@ -95,6 +95,53 @@ export async function embeddedSetup(registry, { start = false, binary = embedded
 }
 export async function gatewaySetup(registry, options) {
   return transportMode(registry) === 'embedded' ? embeddedSetup(registry, options) : setupCheck();
+}
+async function upgradeAccountAgent(registry, status, binary) {
+  // Old helpers remain alive across app updates. Replace only a verified
+  // private agent owned by this exact Gate; never kill an unverified PID.
+  const pid = status.pid;
+  if (!Number.isInteger(pid) || pid < 1) throw new Error('未能確認舊 Tunnel 管理元件，未有操作任何程序。');
+  const location = embeddedLocation(registry);
+  const [owner, executable, argumentsText] = await Promise.all([
+    command('/bin/ps', ['-p', String(pid), '-o', 'uid=']),
+    command('/bin/ps', ['-p', String(pid), '-o', 'comm=']),
+    command('/bin/ps', ['-p', String(pid), '-o', 'args='])
+  ]);
+  if (Number(owner.trim()) !== os.userInfo().uid || path.basename(executable.trim()) !== 'boundas-tunnel'
+      || !argumentsText.trim().endsWith(`--state-dir ${location.identity} --gateway-id ${registry.read().id}`)) {
+    throw new Error('舊 Tunnel 管理元件身份唔一致，未有操作任何程序。');
+  }
+  // Recheck the private endpoint immediately before signalling that process.
+  if ((await embeddedRequest(registry, '/status')).pid !== pid) throw new Error('Tunnel 管理元件已變更，請重新檢查。');
+  process.kill(pid, 'SIGTERM');
+  const deadline = Date.now() + 12000;
+  while (Date.now() < deadline) {
+    try { await embeddedRequest(registry, '/status'); }
+    catch (error) {
+      if (['ENOENT', 'ECONNREFUSED'].includes(error.code)) {
+        const upgraded = await embeddedSetup(registry, { start: true, requestLogin: false, binary });
+        if (upgraded.accountManagementVersion === 1) return;
+        break;
+      }
+      throw error;
+    }
+    await new Promise(resolve => setTimeout(resolve, 200));
+  }
+  throw new Error('Tunnel 管理元件未完成更新，請稍後重試。');
+}
+export async function tunnelAccount(registry, action, { binary = embeddedBinary(), run = command, confirmedExternal = false } = {}) {
+  if (!['login', 'logout'].includes(action)) throw new Error('Tunnel 操作無效。');
+  if (transportMode(registry, binary) === 'external') {
+    if (action === 'logout' && !confirmedExternal) throw new Error('外置 Tunnel 登出會影響同一 Mac 裝置嘅其他連線，請先確認。');
+    if (!binary) throw new Error('安裝包缺少 Tunnel 管理元件，請更新 Boundas Gate。');
+    const result = JSON.parse(await run(binary, ['--external-auth', action], 16000));
+    if (!result.ok) throw new Error(result.message ?? 'Tunnel 操作未能完成。');
+    return result;
+  }
+  const setup = await embeddedSetup(registry, { start: true, requestLogin: action === 'login', binary });
+  if (action === 'login') return setup;
+  if (setup.accountManagementVersion !== 1) await upgradeAccountAgent(registry, setup, binary);
+  return embeddedRequest(registry, '/logout', {}, 12000);
 }
 export class EmbeddedProvider {
   name = 'tailscale-embedded';

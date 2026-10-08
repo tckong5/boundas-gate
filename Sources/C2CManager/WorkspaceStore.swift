@@ -27,7 +27,35 @@ final class WorkspaceStore: ObservableObject {
 
     var runningCount: Int { sideGateWorkspaces.filter { statuses[$0.id]?.running == true }.count }
     var healthyConnectionCount: Int { sideGateWorkspaces.filter { $0.canOperateSideGate && diagnostics[$0.id]?.isUsable == true }.count }
-    var sideGateWorkspaces: [WorkspaceRecord] { workspaces.filter(\.belongsToSideGates) }
+    var mainGateWorkspaces: [WorkspaceRecord] { orderedFolders(side: false) }
+    var sideGateWorkspaces: [WorkspaceRecord] { orderedFolders(side: true) }
+
+    private func orderedFolders(side: Bool) -> [WorkspaceRecord] {
+        workspaces.enumerated()
+            .filter { side ? $0.element.belongsToSideGates : $0.element.belongsToMainGate }
+            .sorted {
+                let lhs = (side ? $0.element.sideGateOrder : $0.element.mainGateOrder) ?? $0.offset
+                let rhs = (side ? $1.element.sideGateOrder : $1.element.mainGateOrder) ?? $1.offset
+                return lhs == rhs ? $0.offset < $1.offset : lhs < rhs
+            }
+            .map(\.element)
+    }
+
+    func moveFolders(from offsets: IndexSet, to destination: Int, side: Bool) {
+        var folders = side ? sideGateWorkspaces : mainGateWorkspaces
+        guard !offsets.isEmpty, offsets.allSatisfy({ folders.indices.contains($0) }),
+              (0...folders.count).contains(destination) else { return }
+        let moving = offsets.sorted().map { folders[$0] }
+        for index in offsets.sorted(by: >) { folders.remove(at: index) }
+        folders.insert(contentsOf: moving, at: destination - offsets.filter { $0 < destination }.count)
+        let original = workspaces
+        for (order, folder) in folders.enumerated() {
+            guard let index = workspaces.firstIndex(where: { $0.id == folder.id }) else { continue }
+            if side { workspaces[index].sideGateOrder = order }
+            else { workspaces[index].mainGateOrder = order }
+        }
+        if !save() { workspaces = original }
+    }
 
     init(configURL: URL? = nil, client: (any SideGateClient)? = nil,
          gateway: SharedGatewayStore? = nil, automaticallyRefresh: Bool = true) {

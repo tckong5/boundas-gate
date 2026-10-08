@@ -7,7 +7,9 @@ import { spawnSync } from 'node:child_process';
 import { Registry, secureWrite } from './registry.mjs';
 import { FolderAccess } from './access.mjs';
 import { instanceAuthStore } from './auth.mjs';
+import { boundedAuthStore, boundedPairingManager, oauthSecurity } from './oauth-security.mjs';
 import { clearOwnedRuntime } from './runtime-instance.mjs';
+import { oauthPresentation } from './oauth-presentation.mjs';
 import { gatewayProvider } from '../Tailscale/embedded.mjs';
 
 export async function loadBackend(backendRoot) {
@@ -132,9 +134,14 @@ export async function startGateway({ backendRoot, registry = new Registry(), tun
   // Prefer fixed known binaries over executables in a project directory on PATH.
   const rg = ['/opt/homebrew/bin/rg', '/usr/local/bin/rg', '/usr/bin/rg'].find(file => { try { fs.accessSync(file, fs.constants.X_OK); return true; } catch { return false; } });
   if (rg) process.env.C2C_RG_PATH = rg; else process.env.C2C_DISABLE_RG = '1';
-  const InstanceAuthStore = instanceAuthStore(backend.AuthStore, registry);
+  const InstanceAuthStore = instanceAuthStore(boundedAuthStore(backend.AuthStore), registry);
   const authStore = new InstanceAuthStore(config.id, { file: authFile ?? path.join(registry.directory, 'auth.json') });
-  const pairing = new backend.PairingManager(config.id);
+  const PairingManager = boundedPairingManager(backend.PairingManager);
+  const pairing = new PairingManager(config.id);
+  const cleanupTimer = setInterval(() => {
+    try { authStore.cleanupRegistrations(); }
+    catch { console.error('OAuth registration cleanup failed; persistent store could not be updated.'); }
+  }, 60000); cleanupTimer.unref();
   const app = backend.express(); app.disable('x-powered-by'); app.set('trust proxy', true);
   if (sideRoot) app.use((req, res, next) => {
     const aliases = { '/admin/info': '/control/info', '/admin/pairing': '/control/pair', '/admin/revoke-all': '/control/revoke',
@@ -157,13 +164,17 @@ export async function startGateway({ backendRoot, registry = new Registry(), tun
     pid: process.pid, port: localPort, adminToken, publicUrl: publicURL, instanceID, startedAt });
   const persist = () => { if (persistRuntime) secureWrite(runtimeFile, runtimeRecord()); };
   app.get('/health', (_req, res) => res.json({ service, workspaceId: config.id, status: 'ok', instanceID, startedAt }));
+  app.use('/oauth', backend.express.urlencoded({ extended: false, limit: '32kb' }), backend.express.json({ limit: '32kb' }));
+  // Mounted at the root so security policy sees the full OAuth route path.
+  app.use(oauthSecurity({ store: authStore }));
   // Explicitly reject resource confusion without accepting a client's root grants.
   app.use(['/oauth/authorize', '/oauth/token'], backend.express.urlencoded({ extended: false, limit: '32kb' }), backend.express.json({ limit: '32kb' }), (req, res, next) => {
     const resource = req.query.resource ?? req.body?.resource;
     if (resource !== undefined && resource !== `${getBaseUrl()}/mcp`) { res.status(400).json({ error: 'invalid_target' }); return; }
     next();
   });
-  app.use(backend.createOAuthRouter({ store: authStore, pairing, workspaceName: 'Boundas Gate（讀取 App 目前及之後確認分享嘅 Folders；可隨時停止分享）', getBaseUrl, logger: backend.logger }));
+  app.use(oauthPresentation({ store: authStore }));
+  app.use(backend.createOAuthRouter({ store: authStore, pairing, workspaceName: 'Boundas Gate', getBaseUrl, logger: backend.logger }));
   const mcpHandler = backend.createMcpHttpHandler(() => makeMcpServer(backend, registry, access), backend.logger);
   app.all('/mcp', backend.express.json({ limit: '1mb' }), backend.bearerAuth({ store: authStore, workspaceId: config.id, getBaseUrl, logger: backend.logger }), (req, res) => {
     // Removed/retiring Side membership rejects admission, while private admin
@@ -184,8 +195,12 @@ export async function startGateway({ backendRoot, registry = new Registry(), tun
   };
   app.get('/control/info', admin, (_req, res) => {
     try { res.json({ running: true, state: 'running', gatewayID: config.id, workspaceId: config.id, workspaceRoot: sideRoot,
-      instanceID, startedAt, port: localPort, pid: process.pid, publicUrl: publicURL, tunnel: provider.status(), tokenCount: authStore.tokenCount(), pairingActive: pairing.hasActiveSession(), accessCodeVersion: 1, connectionVersion: 1, authorizationVersion: 2, folderAccess: access.status() }); }
+      instanceID, startedAt, port: localPort, pid: process.pid, publicUrl: publicURL, tunnel: provider.status(), tokenCount: authStore.tokenCount(), pairingActive: pairing.hasActiveSession(), accessCodeVersion: 1, connectionVersion: 1, authorizationVersion: 2, clientManagementVersion: 1, folderAccess: access.status() }); }
     catch { res.status(503).json({ message: '共用設定無效，已拒絕存取。' }); }
+  });
+  app.post('/control/remove-client', admin, backend.express.json({ limit: '2kb' }), (req, res) => {
+    try { authStore.removeInactiveClient(req.body?.clientID); res.json({ ok: true }); }
+    catch (error) { res.status(409).json({ message: error.message }); }
   });
   app.post('/control/code-policy', admin, backend.express.json({ limit: '2kb' }), (req, res) => {
     try {
@@ -223,7 +238,7 @@ export async function startGateway({ backendRoot, registry = new Registry(), tun
   const server = await new Promise((resolve, reject) => { const listening = app.listen(port, '127.0.0.1', () => resolve(listening)); listening.once('error', reject); });
   localPort = server.address().port; persist();
   async function close() {
-    if (closed) return; closed = true; access.revokeAll();
+    if (closed) return; closed = true; clearInterval(cleanupTimer); access.revokeAll();
     server.closeAllConnections();
     await new Promise(resolve => server.close(resolve));
     await provider.stop().catch(() => {});

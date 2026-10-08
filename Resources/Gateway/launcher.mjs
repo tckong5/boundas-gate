@@ -67,6 +67,13 @@ try {
         registry.setCodePolicy(body.workspaceID, body.required); output(await status());
       } else throw new Error('請先開啟共用連線。');
     });
+  } else if (action === 'remove-client') {
+    await withLock(registry.directory, async () => {
+      const current = await observation();
+      if (current.state !== 'healthy' || current.info.clientManagementVersion !== 1) throw new Error('請先重新開啟共用連線，以套用 AI 登記管理功能。');
+      await control(current.runtime, '/control/remove-client', 'POST', 12000, JSON.parse(input));
+      output(await status());
+    });
   } else if (action === 'status') { output(await status()); }
   else if (action === 'login') {
     if (transportMode(registry) !== 'embedded') throw new Error('現有連線沿用原本嘅 Tailscale 裝置，未有轉換地址。');

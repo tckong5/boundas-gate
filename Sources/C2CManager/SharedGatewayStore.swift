@@ -50,6 +50,7 @@ struct GatewayFolderCode: Decodable {
 }
 
 struct GatewayStatus: Decodable {
+    var clientManagementVersion: Int? = nil
     let running: Bool?
     let state: String
     let reason: String?
@@ -251,7 +252,8 @@ final class SharedGatewayStore: ObservableObject {
 
     @discardableResult
     func perform(_ action: String, selectedIDs: [String]? = nil, sourceID: String? = nil,
-                 workspaceID: String? = nil, codeRequired: Bool? = nil, reconnectEnabled: Bool? = nil) async -> Bool {
+                 workspaceID: String? = nil, codeRequired: Bool? = nil, reconnectEnabled: Bool? = nil,
+                 clientID: String? = nil) async -> Bool {
         guard !working else { return false }
         working = true
         revision += 1
@@ -260,7 +262,8 @@ final class SharedGatewayStore: ObservableObject {
         defer { working = false }
         do {
             let input: Data?
-            if let reconnectEnabled { input = try JSONEncoder().encode(["enabled": reconnectEnabled]) }
+            if let clientID { input = try JSONEncoder().encode(["clientID": clientID]) }
+            else if let reconnectEnabled { input = try JSONEncoder().encode(["enabled": reconnectEnabled]) }
             else if let workspaceID {
                 struct FolderInput: Encodable { let workspaceID: String; let required: Bool? }
                 input = try JSONEncoder().encode(FolderInput(workspaceID: workspaceID, required: codeRequired))

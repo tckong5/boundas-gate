@@ -1,14 +1,39 @@
 #!/bin/sh
-# Read-only Git entry point for the gateway. Never invoke custom diff programs.
+# Only the fixed read operations used by Boundas Gate are permitted.
+# Paths MUST be after --; unknown options are rejected, never guessed as paths.
 case "$1" in
   diff)
     shift
-    exec /usr/bin/git diff --no-ext-diff --no-textconv "$@"
+    paths=false
+    count=0
+    for argument do
+      if "$paths"; then
+        case "$argument" in /*|..|../*|*/../*) exit 126 ;; esac
+        count=$((count + 1))
+      else
+        case "$argument" in
+          --) paths=true ;;
+          --name-status|-z|--find-renames=1%|--cached|HEAD|--no-color|--no-ext-diff|--no-textconv) ;;
+          *) exit 126 ;;
+        esac
+      fi
+    done
+    "$paths" && [ "$count" -gt 0 ] || exit 126
+    exec /usr/bin/git -c core.fsmonitor=false -c core.hooksPath=/dev/null diff --no-ext-diff --no-textconv "$@"
     ;;
-  status|rev-parse)
-    exec /usr/bin/git "$@"
+  status)
+    case "$*" in
+      'status --porcelain -- .'|'status --porcelain=v2 --branch -- .')
+        exec /usr/bin/git -c core.fsmonitor=false -c core.hooksPath=/dev/null "$@" ;;
+      *) exit 126 ;;
+    esac
     ;;
-  *)
-    exit 126
+  rev-parse)
+    case "$*" in
+      'rev-parse --is-inside-work-tree'|'rev-parse --abbrev-ref HEAD'|'rev-parse --short HEAD')
+        exec /usr/bin/git "$@" ;;
+      *) exit 126 ;;
+    esac
     ;;
+  *) exit 126 ;;
 esac

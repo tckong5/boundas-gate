@@ -37,10 +37,10 @@ export class Registry {
     try { const items = JSON.parse(fs.readFileSync(this.allowlistFile, 'utf8')); return Array.isArray(items) ? items : []; }
     catch { return []; } // Never use a stale allowlist when its file is missing or invalid.
   }
-  available(root) {
-    return root.enabled && this.addedFolders().some(item => typeof item.id === 'string' && item.id.toLowerCase() === root.sourceID.toLowerCase() && item.c2cID === root.id && item.path === root.path);
+  available(root, added = this.addedFolders()) {
+    return root.enabled && added.some(item => typeof item.id === 'string' && item.id.toLowerCase() === root.sourceID.toLowerCase() && item.c2cID === root.id && item.path === root.path);
   }
-  active() { return (this.read()?.roots ?? []).filter(root => this.available(root)); }
+  active() { const added = this.addedFolders(); return (this.read()?.roots ?? []).filter(root => this.available(root, added)); }
   connection() {
     const config = this.read();
     const stableMCPURL = config?.stableMCPURL ?? config?.configuredMCPURL ?? null;

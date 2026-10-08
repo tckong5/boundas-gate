@@ -145,12 +145,19 @@ struct C2CClient: SideGateClient {
         var arguments = [action, backend]
         if let sourceID { arguments.append(sourceID) }
         if let input, let json = String(data: input, encoding: .utf8) { arguments.append(json) }
-        let result = try await run(arguments, entry: helper)
+        let result: CommandResult
+        do { result = try await run(arguments, entry: helper) }
+        catch {
+            GatewayDiagnosticsLog.record(.init(code: -1, output: "", error: error.localizedDescription), action: action)
+            throw error
+        }
         guard let data = result.output.data(using: .utf8),
               let response = try? JSONDecoder().decode(GatewayCommandResponse.self, from: data) else {
-            throw C2CClientError.commandFailed("共用連線未能回應。")
+            GatewayDiagnosticsLog.record(result, action: action)
+            throw C2CClientError.commandFailed("Gate 未能回應；詳細原因已記錄。")
         }
         guard result.code == 0, response.ok else {
+            GatewayDiagnosticsLog.record(result, action: action)
             throw C2CClientError.commandFailed(response.message ?? "共用連線未能完成操作。")
         }
         return data
@@ -168,7 +175,22 @@ struct C2CClient: SideGateClient {
 
     private func sideLifecycle(_ action: String, _ workspace: WorkspaceRecord) async throws -> CommandResult {
         let helper = try resource("Gateway/side-lifecycle.mjs")
-        return try await run([action, RuntimePaths.current.backend, workspace.id.uuidString.lowercased()], entry: helper)
+        let result: CommandResult
+        do { result = try await run([action, RuntimePaths.current.backend, workspace.id.uuidString.lowercased()], entry: helper) }
+        catch {
+            GatewayDiagnosticsLog.record(.init(code: -1, output: "", error: error.localizedDescription), action: "side-\(action)")
+            throw error
+        }
+        guard let data = result.output.data(using: .utf8),
+              let response = try? JSONDecoder().decode(GatewayCommandResponse.self, from: data) else {
+            GatewayDiagnosticsLog.record(result, action: "side-\(action)")
+            throw C2CClientError.commandFailed("Side Gate 未能回應；詳細原因已記錄。")
+        }
+        guard result.code == 0, response.ok else {
+            GatewayDiagnosticsLog.record(result, action: "side-\(action)")
+            throw C2CClientError.commandFailed(response.message ?? "Side Gate 未能完成操作。")
+        }
+        return result
     }
 
     func pair(_ workspace: WorkspaceRecord) async throws -> PairingCode {

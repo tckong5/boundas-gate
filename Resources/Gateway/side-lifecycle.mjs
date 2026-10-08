@@ -9,6 +9,7 @@ import { TailscaleProvider, retireRoutes, withLock } from '../Tailscale/provider
 import { SideRegistry } from './side-registry.mjs';
 import { startGateway, loadBackend } from './server.mjs';
 import { observeRuntime } from './runtime-instance.mjs';
+import { diagnosticError } from './diagnostics.mjs';
 
 // Side membership is checked at the process boundary and again on bearer access.
 export function sideRecord(registry, sourceID, removing = false) {
@@ -160,6 +161,7 @@ async function main() {
 }
 if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
   main().catch(error => {
+    console.error(diagnosticError(error));
     process.stdout.write(`${JSON.stringify({ ok: false, message: error.message })}\n`); process.exitCode = 1;
   });
 }

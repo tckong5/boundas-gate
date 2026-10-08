@@ -7,8 +7,9 @@ import { Registry, secureWrite } from './registry.mjs';
 import { loadBackend, startGateway } from './server.mjs';
 import { withLock } from '../Tailscale/provider.mjs';
 import { gatewaySetup, transportMode, tunnelAccount } from '../Tailscale/embedded.mjs';
-import { readRuntime, observeRuntime } from './runtime-instance.mjs';
 import { readAIConnections } from './connection-status.mjs';
+import { readRuntime, observeRuntime } from './runtime-instance.mjs';
+import { diagnosticError } from './diagnostics.mjs';
 
 const [action, backendRoot, input] = process.argv.slice(2);
 const registry = new Registry();
@@ -50,7 +51,7 @@ async function status() {
     publicUrl: connection.stableMCPURL?.replace(/\/mcp$/, ''), ...observed.info, ...connection,
     desiredRunning: connection.desiredRunning ?? observed.state === 'healthy',
     connectionRemembered: connection.desiredRunning !== null,
-    gatewayID: config?.id, roots: (config?.roots ?? []).filter(root => root.enabled && registry.available(root)), configuredMCPURL: config?.configuredMCPURL,
+    gatewayID: config?.id, roots: registry.active(), configuredMCPURL: config?.configuredMCPURL,
     transport, transportSetup, aiConnections: readAIConnections(registry.directory, config?.id) };
 }
 try {
@@ -173,4 +174,7 @@ try {
     await withLock(registry.directory, async () => secureWrite(path.join(registry.directory, 'config.json'), { ...registry.read(), configuredMCPURL: value }));
     output(await status());
   } else throw new Error('Unknown action');
-} catch (error) { output({ ok: false, message: error.message ?? '共用連線未能完成操作。' }); process.exitCode = 1; }
+} catch (error) {
+  console.error(diagnosticError(error));
+  output({ ok: false, message: error.message ?? '共用連線未能完成操作。' }); process.exitCode = 1;
+}

@@ -49,6 +49,29 @@ struct GatewayFolderCode: Decodable {
     }
 }
 
+struct GatewayAIConnection: Decodable, Identifiable, Equatable {
+    let clientID: String
+    let name: String
+    let authorizationState: String
+    let authorizationExpiresAt: Double?
+    let reason: String?
+    var id: String { clientID }
+    var isAuthorized: Bool {
+        authorizationState == "authorized" && authorizationExpiresAt.map {
+            $0.isFinite && Date(timeIntervalSince1970: $0 / 1000) > Date()
+        } == true
+    }
+    var statusLabel: String {
+        if isAuthorized { return "Authorized" }
+        switch authorizationState {
+        case "revoked": return "Revoked"
+        case "invalid", "authorized": return "Invalid"
+        default: return "Not authorized"
+        }
+    }
+    var needsAttention: Bool { !isAuthorized && ["authorized", "invalid", "revoked"].contains(authorizationState) }
+}
+
 struct GatewayStatus: Decodable {
     var clientManagementVersion: Int? = nil
     let running: Bool?
@@ -73,6 +96,7 @@ struct GatewayStatus: Decodable {
     var authorizationVersion: Int? = nil
     var transport: String? = nil
     var transportSetup: EmbeddedConnectionSetup? = nil
+    var aiConnections: [GatewayAIConnection]? = nil
 
     var bridgeStatus: WorkspaceStatus {
         .init(running: running, state: state, reason: reason, port: port, pid: pid, publicUrl: publicUrl,
@@ -109,17 +133,17 @@ enum GatewayConnectionState: Equatable {
         switch self {
         case .checking: return "檢查中…"
         case .unknown: return "未能確認狀態"
-        case .stopped: return "未開啟"
-        case .needsRepair: return "連線需要修復"
-        case .ready: return "Mac 連線正常"
+        case .stopped: return "Gate Closed"
+        case .needsRepair: return "Gate Needs Attention"
+        case .ready: return "Gate Open"
         }
     }
 
     var button: String {
         switch self {
         case .checking, .unknown: return "重新檢查"
-        case .stopped: return "開啟共用連線"
-        case .needsRepair: return "修復共用連線"
+        case .stopped: return "Open Main Gate"
+        case .needsRepair: return "Repair Main Gate"
         case .ready: return "複製 URL · 開啟 ChatGPT"
         }
     }
@@ -133,6 +157,8 @@ final class SharedGatewayStore: ObservableObject {
     @Published private(set) var pairing: GatewayPairing?
     @Published private(set) var folderCodes: [String: GatewayFolderCode] = [:]
     @Published private(set) var working = false
+    @Published private(set) var operation: String?
+    @Published private(set) var restarting = false
     @Published private(set) var checking = false
     @Published private(set) var statusConfirmed = false
     @Published private(set) var reconnecting = false
@@ -155,10 +181,12 @@ final class SharedGatewayStore: ObservableObject {
     }
     var connectionTitle: String {
         if reconnecting { return "重新連線中…" }
+        if diagnostics?.hasPublicDNSFailure == true && !checking { return "暫時搵唔到連線地址" }
         if waitingToReconnect && !checking { return "等待重新連線" }
         return connectionState.title
     }
     var connectionHint: String {
+        if diagnostics?.hasPublicDNSFailure == true { return publicDNSHint }
         if waitingToReconnect { return "恢復後沿用原有 ChatGPT 設定。" }
         if usable {
             return (status?.tokenCount ?? 0) > 0
@@ -173,6 +201,7 @@ final class SharedGatewayStore: ObservableObject {
         if status?.transport == "embedded", status?.transportSetup?.state != "ready" {
             return status?.transportSetup?.message ?? "請完成內置連線登入，再重新檢查。"
         }
+        if diagnostics?.hasPublicDNSFailure == true { return publicDNSHint }
         if message.contains("地址同原有") || message.contains("固定地址同原有") {
             return "固定地址唔一致，請連返原有 Tailscale 帳戶／裝置。原有設定已保留。"
         }
@@ -182,6 +211,10 @@ final class SharedGatewayStore: ObservableObject {
         }
         if waitingToReconnect { return "連線暫時未通，App 會自動再試。" }
         return "暫時未能連線，請按「重新檢查」；詳情已收喺連線詳細資料。"
+    }
+
+    private var publicDNSHint: String {
+        "Mac 暫時搵唔到公開地址。稍後再檢查；如有開 VPN，可暫停後再試。毋須重新登入或下載 Tailscale。"
     }
 
     init(automaticallyRefresh: Bool = true, gateSourceID: String? = nil) {
@@ -256,10 +289,11 @@ final class SharedGatewayStore: ObservableObject {
                  clientID: String? = nil, confirmedExternal: Bool? = nil) async -> Bool {
         guard !working else { return false }
         working = true
+        operation = action
         revision += 1
         checking = false
         message = nil
-        defer { working = false }
+        defer { working = false; operation = nil }
         do {
             let input: Data?
             if let confirmedExternal { input = try JSONEncoder().encode(["confirmedExternal": confirmedExternal]) }
@@ -320,6 +354,8 @@ final class SharedGatewayStore: ObservableObject {
 
     func restart() async {
         guard !working, statusConfirmed, status?.state != "unknown", status?.running != nil else { return }
+        restarting = true
+        defer { restarting = false }
         if status?.running == true {
             guard await perform("stop") else { return }
         }

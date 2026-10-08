@@ -58,9 +58,9 @@ private struct MenuBarContent: View {
     }
 
     var body: some View {
-        Text("共用連線：\(gateway.connectionTitle)")
+        Text("Main Gate：\(gateway.connectionTitle)")
         Divider()
-        Button("共用 ChatGPT 連線…") {
+        Button("Main Gate…") {
             store.selectedID = SharedGatewayStore.selectionID
             showManager()
         }
@@ -92,9 +92,9 @@ private struct MenuBarContent: View {
             }.disabled(gateway.working)
         }
         Divider()
-        Text("獨立連線：\(store.healthyConnectionCount) 個就緒")
-        if store.workspaces.isEmpty {
-            Text("尚未加入 Workspace")
+        Text("Side Gates：\(store.healthyConnectionCount) 個就緒")
+        if store.sideGateWorkspaces.isEmpty {
+            Text("尚未加入 Side Gate")
         }
         ForEach(store.sideGateWorkspaces) { workspace in
             Menu {
@@ -126,7 +126,7 @@ private struct MenuBarContent: View {
                 Divider()
                 Button("Open Logs") { store.openLogs(workspace) }
                 Button("Open Folder") { store.openFolder(workspace) }
-                Button("Manage Workspace…") {
+                Button("Manage Side Gate…") {
                     store.selectedID = workspace.id
                     showManager()
                 }
@@ -137,11 +137,11 @@ private struct MenuBarContent: View {
         }
         Divider()
         Button("Add Folders…", systemImage: "plus") { store.addFolder() }
-        Button("Add Workspace by Path…", systemImage: "text.cursor") {
+        Button("Add Folder by Path…", systemImage: "text.cursor") {
             showManager()
             store.showingAddPath = true
         }
-        Button("Start All Independent Connections") {
+        Button("Open All Side Gates") {
             Task {
                 await store.startAll()
                 if let workspace = store.workspaces.first(where: { store.pairingCodes[$0.id] != nil }) {
@@ -150,11 +150,11 @@ private struct MenuBarContent: View {
                 }
             }
         }
-            .disabled(store.workspaces.isEmpty)
-        Button("Stop All") { Task { await store.stopAll() } }
-            .disabled(store.runningCount == 0 && gateway.status?.running != true)
+            .disabled(store.sideGateWorkspaces.isEmpty)
+        Button("Close All Side Gates") { Task { await store.stopAll() } }
+            .disabled(store.runningCount == 0)
         Divider()
-        Button("Manage Workspaces…") { showManager() }
+        Button("Manage Folders…") { showManager() }
         Button("Open ChatGPT") { store.openChatGPT() }
         Button("Quit Boundas Gate") { NSApp.terminate(nil) }
     }
@@ -166,10 +166,38 @@ private struct MenuBarContent: View {
 }
 
 private struct ManagerWindow: View {
+    private enum GateMode {
+        case main, side
+    }
+
     @ObservedObject var store: WorkspaceStore
     @ObservedObject var gateway: SharedGatewayStore
+    @State private var mainFolderSelection: UUID?
+    @State private var sideFolderSelection: UUID?
+    @State private var sharedSelection: Set<String> = []
+    @State private var lastSavedSharedSelection: Set<String>?
+    @State private var renamingFolderID: UUID?
+    @State private var renamedFolderName = ""
+    @FocusState private var renameFocus: UUID?
     let appDelegate: ManagerAppDelegate
     @Environment(\.openWindow) private var openWindow
+
+    private var gateMode: GateMode {
+        store.selectedID == SharedGatewayStore.selectionID ? .main : .side
+    }
+
+    private var gateModeBinding: Binding<GateMode> {
+        Binding(
+            get: { gateMode },
+            set: { mode in
+                store.selectedID = mode == .main ? SharedGatewayStore.selectionID : sideFolderSelection
+            }
+        )
+    }
+
+    private var savedSharedSelection: Set<String> {
+        Set((gateway.status?.roots ?? []).map { $0.sourceID.lowercased() })
+    }
 
     init(store: WorkspaceStore, appDelegate: ManagerAppDelegate) {
         self.store = store
@@ -179,33 +207,89 @@ private struct ManagerWindow: View {
 
     var body: some View {
         NavigationSplitView {
-            List(selection: $store.selectedID) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Label("共用 ChatGPT 連線", systemImage: "folder.badge.person.crop")
-                    Text(gateway.connectionTitle).font(.caption)
-                        .foregroundStyle(gateway.usable ? Color.green : Color.secondary)
-                }.padding(.vertical, 4).tag(SharedGatewayStore.selectionID)
-                Section("獨立 Folder 連線") {
-                ForEach(store.workspaces) { workspace in
-                    HStack(spacing: 10) {
-                        Image(systemName: store.statuses[workspace.id]?.running == true ? "circle.fill" : "circle")
-                            .font(.system(size: 10))
-                            .foregroundStyle(store.diagnostics[workspace.id]?.isUsable == true ? Color.green : store.statuses[workspace.id]?.running == true ? Color.orange : Color.secondary)
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(workspace.name).fontWeight(.medium)
-                            Text(workspace.path).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            VStack(alignment: .leading, spacing: 0) {
+                GateSelector(isMainGate: Binding(
+                    get: { gateMode == .main },
+                    set: { gateModeBinding.wrappedValue = $0 ? .main : .side }
+                ))
+
+                HStack(spacing: 6) {
+                    Text("Folders")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    RepositoryAddAction(byPath: true) { store.showingAddPath = true }
+                    RepositoryAddAction(byPath: false) { store.addFolder() }
+                }
+                .padding(.horizontal, 16).padding(.top, 6)
+
+                if gateMode == .main {
+                    List(selection: $mainFolderSelection) {
+                        ForEach(store.workspaces) { workspace in
+                            HStack(spacing: 10) {
+                                mainFolderLabel(workspace)
+                                Spacer(minLength: 8)
+                                MainGateFolderPasscodeButton(
+                                    gateway: gateway, workspace: workspace,
+                                    configurationChanged: sharedSelection != savedSharedSelection
+                                )
+                                Toggle("Main Gate access for \(workspace.name)", isOn: Binding(
+                                    get: { sharedSelection.contains(workspace.id.uuidString.lowercased()) },
+                                    set: { enabled in
+                                        let id = workspace.id.uuidString.lowercased()
+                                        if enabled { sharedSelection.insert(id) } else { sharedSelection.remove(id) }
+                                    }
+                                ))
+                                .toggleStyle(.switch).controlSize(.mini).labelsHidden().fixedSize()
+                                .disabled(gateway.working || !gateway.statusConfirmed)
+                            }
+                            .padding(.vertical, 2).tag(workspace.id)
+                            .contextMenu {
+                                Button("Rename") { beginRename(workspace) }
+                                Button("Remove Folder", role: .destructive) { store.removeFolder(workspace) }
+                                    .disabled(workspace.belongsToSideGates)
+                            }
                         }
                     }
-                    .tag(workspace.id)
-                    .padding(.vertical, 4)
-                }
+                    .listStyle(.sidebar)
+                    .onKeyPress(.return) {
+                        guard renamingFolderID == nil,
+                              let workspace = store.workspaces.first(where: { $0.id == mainFolderSelection }) else {
+                            return .ignored
+                        }
+                        beginRename(workspace)
+                        return .handled
+                    }
+                    .overlay {
+                        if store.workspaces.isEmpty { SidebarEmptyFolders() }
+                    }
+                    if sharedSelection != savedSharedSelection {
+                        Button("儲存變更") {
+                            Task { _ = await gateway.perform("configure", selectedIDs: sharedSelection.sorted()) }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(gateway.working || !gateway.statusConfirmed)
+                        .padding(.horizontal, 16).padding(.bottom, 12)
+                    }
+                } else {
+                    List(selection: $store.selectedID) {
+                        ForEach(store.sideGateWorkspaces) { workspace in
+                            HStack(spacing: 10) {
+                                Image(systemName: store.statuses[workspace.id]?.running == true ? "circle.fill" : "circle")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(workspace.sideGateRemovalState != nil ? Color.orange : store.diagnostics[workspace.id]?.isUsable == true ? Color.green : store.statuses[workspace.id]?.running == true ? Color.orange : Color.secondary)
+                                folderLabel(workspace)
+                            }
+                            .padding(.vertical, 2).tag(workspace.id)
+                        }
+                    }
+                    .listStyle(.sidebar)
+                    .overlay {
+                        if store.sideGateWorkspaces.isEmpty { SidebarEmptyFolders() }
+                    }
                 }
             }
-            .navigationTitle("Workspaces")
             .toolbar {
-                Button("Add Folders", systemImage: "plus") { store.addFolder() }
-                    .help("按住 ⌘ 可一次選多個資料夾。")
-                Button("Add by Path", systemImage: "text.cursor") { store.showingAddPath = true }
                 Button("重新檢查", systemImage: "arrow.clockwise") {
                     Task { await gateway.refresh() }
                     Task { await store.refreshAll() }
@@ -213,12 +297,12 @@ private struct ManagerWindow: View {
             }
             .frame(minWidth: 270)
         } detail: {
-            if store.selectedID == SharedGatewayStore.selectionID {
-                SharedGatewayView(store: store, gateway: store.gateway)
-            } else if let workspace = store.workspaces.first(where: { $0.id == store.selectedID }) {
+            if gateMode == .main {
+                SharedGatewayView(store: store, gateway: store.gateway, selected: $sharedSelection)
+            } else if let workspace = store.sideGateWorkspaces.first(where: { $0.id == store.selectedID }) {
                 WorkspaceDetail(store: store, workspace: workspace).id(workspace.id)
             } else {
-                ContentUnavailableView("選擇一個 Workspace", systemImage: "folder", description: Text("加入任何 folder，然後獨立管理佢嘅 C2C 連線。"))
+                ContentUnavailableView("選擇一個 Folder", systemImage: "folder", description: Text("加入任何 folder，然後管理佢嘅 Side Gate。"))
             }
         }
         .alert("Boundas Gate", isPresented: Binding(
@@ -234,7 +318,141 @@ private struct ManagerWindow: View {
         }
         .onAppear {
             appDelegate.openManagerWindow = { openWindow(id: "manager") }
+            syncSharedSelection()
         }
+        .onChange(of: store.selectedID, initial: true) { _, id in
+            if let id, id != SharedGatewayStore.selectionID { sideFolderSelection = id }
+            if id != SharedGatewayStore.selectionID { cancelRename() }
+        }
+        .onChange(of: mainFolderSelection) { _, id in
+            if let renamingFolderID, renamingFolderID != id { cancelRename() }
+        }
+        .onChange(of: gateway.status?.roots) { _, _ in syncSharedSelection() }
+        .onChange(of: gateway.statusConfirmed) { _, confirmed in
+            if confirmed { syncSharedSelection() }
+        }
+        .onChange(of: store.workspaces) { previous, records in
+            let ids = Set(records.map(\.id))
+            sharedSelection.formIntersection(Set(ids.map { $0.uuidString.lowercased() }))
+            if store.selectedID == SharedGatewayStore.selectionID, previous.isEmpty, let first = records.first {
+                sharedSelection.insert(first.id.uuidString.lowercased())
+            }
+            if let id = mainFolderSelection, !ids.contains(id) { mainFolderSelection = nil }
+            if let id = sideFolderSelection, !records.contains(where: { $0.id == id && $0.belongsToSideGates }) { sideFolderSelection = nil }
+            if let id = renamingFolderID, !ids.contains(id) { cancelRename() }
+        }
+    }
+
+    private func mainFolderLabel(_ workspace: WorkspaceRecord) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            if renamingFolderID == workspace.id {
+                TextField("Folder name", text: $renamedFolderName)
+                    .textFieldStyle(.plain).fontWeight(.medium)
+                    .focused($renameFocus, equals: workspace.id)
+                    .onAppear { renameFocus = workspace.id }
+                    .onSubmit {
+                        store.rename(workspace, to: renamedFolderName)
+                        cancelRename()
+                    }
+                    .onExitCommand { cancelRename() }
+            } else {
+                Text(workspace.name).fontWeight(.medium).lineLimit(1)
+            }
+            Text(sidebarPath(workspace.path))
+                .font(.caption).foregroundStyle(.secondary)
+                .lineLimit(1).truncationMode(.head).help(workspace.path)
+        }
+    }
+
+    private func beginRename(_ workspace: WorkspaceRecord) {
+        mainFolderSelection = workspace.id
+        renamedFolderName = workspace.name
+        renamingFolderID = workspace.id
+    }
+
+    private func cancelRename() {
+        renamingFolderID = nil
+        renameFocus = nil
+    }
+
+    private func folderLabel(_ workspace: WorkspaceRecord) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(workspace.name).fontWeight(.medium).lineLimit(1)
+            Text(sidebarPath(workspace.path))
+                .font(.caption).foregroundStyle(.secondary)
+                .lineLimit(1).truncationMode(.head).help(workspace.path)
+        }
+    }
+
+    private func sidebarPath(_ path: String) -> String {
+        let abbreviated = NSString(string: path).abbreviatingWithTildeInPath
+        let components = abbreviated.split(separator: "/")
+        guard components.count > 3 else { return abbreviated }
+        return "…/" + components.suffix(2).joined(separator: "/")
+    }
+
+    private func syncSharedSelection() {
+        guard gateway.statusConfirmed, gateway.status != nil else { return }
+        // Permissions come from configured roots, independently of runtime state.
+        // Preserve the draft while navigating or receiving background refreshes.
+        if lastSavedSharedSelection.map({ sharedSelection == $0 }) ?? sharedSelection.isEmpty {
+            sharedSelection = savedSharedSelection
+        }
+        lastSavedSharedSelection = savedSharedSelection
+    }
+}
+
+private struct SidebarEmptyFolders: View {
+    var body: some View {
+        GeometryReader { geometry in
+            VStack(spacing: 6) {
+                Text("Open your first Gate")
+                    .font(.system(size: 13, weight: .medium))
+                Text("Choose a folder to connect through Boundas Gate.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 24)
+            .padding(.top, max(48, geometry.size.height * 0.24))
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+private struct RepositoryAddAction: View {
+    let byPath: Bool
+    let action: () -> Void
+    @State private var hovering = false
+
+    private var title: String { byPath ? "Add by Path" : "Add Folder" }
+
+    var body: some View {
+        Button(action: action) {
+            Group {
+                if byPath {
+                    HStack(alignment: .firstTextBaseline, spacing: 1) {
+                        Text("/…").font(.system(size: 12, weight: .medium, design: .monospaced))
+                        Image(systemName: "plus")
+                            .font(.system(size: 6, weight: .semibold))
+                            .offset(y: -4)
+                    }
+                } else {
+                    Image(systemName: "folder.badge.plus")
+                        .font(.system(size: 14, weight: .regular))
+                }
+            }
+            .frame(width: 22, height: 16)
+            .foregroundStyle(hovering ? Color.primary : Color.secondary)
+            .frame(width: 26, height: 24)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(title)
+        .accessibilityLabel(title)
+        .onHover { hovering = $0 }
     }
 }
 
@@ -246,7 +464,7 @@ private struct AddPathSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Add Workspace by Path").font(.title2.bold())
+            Text("Add Folder by Path").font(.title2.bold())
             Text("貼上 folder 路徑；只有你加入嘅 folder 會成為 C2C workspace。")
                 .foregroundStyle(.secondary)
             TextField("~/Projects/my-project", text: $path)
@@ -261,7 +479,7 @@ private struct AddPathSheet: View {
             HStack {
                 Spacer()
                 Button("取消") { dismiss() }
-                Button("加入 Workspace", action: add)
+                Button("加入 Folder", action: add)
                     .buttonStyle(.borderedProminent)
                     .disabled(path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
@@ -285,6 +503,13 @@ private struct WorkspaceDetail: View {
     let workspace: WorkspaceRecord
     @State private var proposedName = ""
     @State private var confirmRemove = false
+    @StateObject private var folderGateway: SharedGatewayStore
+
+    init(store: WorkspaceStore, workspace: WorkspaceRecord) {
+        self.store = store
+        self.workspace = workspace
+        _folderGateway = StateObject(wrappedValue: SharedGatewayStore(automaticallyRefresh: false, gateSourceID: workspace.id.uuidString.lowercased()))
+    }
 
     private var status: WorkspaceStatus? { store.statuses[workspace.id] }
     private var working: Bool { store.busy[workspace.id] != nil }
@@ -304,9 +529,26 @@ private struct WorkspaceDetail: View {
                     }
                 }
 
-                Text("呢頁管理獨立 Folder connector。共用 connector 嘅 Folder 授權，請喺「共用 ChatGPT 連線」管理。")
+                Text("呢頁管理 Side Gate；Main Gate 狀態及 Folder 分享設定互相獨立。")
                     .font(.callout).foregroundStyle(.secondary)
-                ConnectionStatusView(store: store, workspace: workspace)
+                if let removal = workspace.sideGateRemovalState {
+                    Text(removal == .removing ? "Removing…" : "Removing Failed")
+                        .font(.headline).foregroundStyle(.orange)
+                    if let error = workspace.sideGateRemovalError {
+                        Text(error).font(.callout).foregroundStyle(.secondary)
+                    }
+                    if removal == .failed {
+                        Button("Retry") { Task { await store.removeSideGate(workspace) } }
+                            .disabled(working)
+                    }
+                } else {
+                    ConnectionStatusView(store: store, workspace: workspace)
+                    HStack {
+                        Text("Passcode Protection").font(.callout)
+                        MainGateFolderPasscodeButton(gateway: folderGateway, workspace: workspace, configurationChanged: false)
+                    }
+                    .task(id: status?.running) { await folderGateway.refresh() }
+                }
 
                 VStack(alignment: .leading, spacing: 8) {
                     Text(workspace.provider == .tailscale ? "連線方式：Tailscale 固定地址" : "連線方式：Cloudflare 臨時地址")
@@ -340,7 +582,7 @@ private struct WorkspaceDetail: View {
                 Divider()
 
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Workspace").font(.headline)
+                    Text("Folder").font(.headline)
                     HStack {
                         TextField("名稱", text: $proposedName)
                             .onSubmit { store.rename(workspace, to: proposedName) }
@@ -379,7 +621,7 @@ private struct WorkspaceDetail: View {
     private var pairingSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("ChatGPT 配對碼").font(.headline)
+                Text("MCP Connection 配對碼").font(.headline)
                 Spacer()
                 if let count = status?.tokenCount, count > 0 {
                     Text("已授權 \(count) 個連線").font(.caption).foregroundStyle(.secondary)
@@ -407,7 +649,7 @@ private struct WorkspaceDetail: View {
             } else {
                 Text(status?.pairingActive == true
                      ? "現有配對碼無法重新顯示；可喺呢度產生新碼。"
-                     : "首次加入 ChatGPT connector 時需要一次性配對碼。")
+                     : "首次建立 MCP Connection 時需要一次性配對碼。")
                     .foregroundStyle(.secondary)
             }
 

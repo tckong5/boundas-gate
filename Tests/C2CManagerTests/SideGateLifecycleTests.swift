@@ -99,7 +99,7 @@ final class SideGateLifecycleTests: XCTestCase {
         XCTAssertFalse(retained.belongsToSideGates); XCTAssertNil(retained.configuredMCPURL)
         XCTAssertNil(retained.lastObservedMCPURL); XCTAssertEqual(retained.lastKnownMCPURL, record.configuredMCPURL)
         XCTAssertTrue(loaded.gateway === gateway)
-        XCTAssertNil(gateway.status)
+        XCTAssertNil(gateway.status); XCTAssertNil(gateway.operation)
         let restored = WorkspaceStore(configURL: config, client: client, automaticallyRefresh: false)
         XCTAssertEqual(restored.workspaces, loaded.workspaces)
         loaded.selectedID = nil

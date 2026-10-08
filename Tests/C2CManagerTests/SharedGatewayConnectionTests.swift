@@ -19,7 +19,7 @@ final class SharedGatewayConnectionTests: XCTestCase {
         let result = GatewayConnectionState.make(status: status(running: false, state: "stopped"),
                                                  diagnostics: healthy, checking: false)
         XCTAssertEqual(result, .stopped)
-        XCTAssertEqual(result.button, "開啟共用連線")
+        XCTAssertEqual(result.button, "Open Main Gate")
     }
 
     func testUnknownStatusOffersCheckInsteadOfStartOrRepair() {
@@ -38,7 +38,7 @@ final class SharedGatewayConnectionTests: XCTestCase {
         let result = GatewayConnectionState.make(status: status(running: true, state: "running", tunnelRunning: false),
                                                  diagnostics: healthy, checking: false)
         XCTAssertEqual(result, .needsRepair)
-        XCTAssertEqual(result.button, "修復共用連線")
+        XCTAssertEqual(result.button, "Repair Main Gate")
     }
 
     func testRunningGatewayWithoutPassedPublicChecksNeedsRepair() {

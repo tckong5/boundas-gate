@@ -8,6 +8,7 @@ import { loadBackend, startGateway } from './server.mjs';
 import { withLock } from '../Tailscale/provider.mjs';
 import { gatewaySetup, transportMode, tunnelAccount } from '../Tailscale/embedded.mjs';
 import { readRuntime, observeRuntime } from './runtime-instance.mjs';
+import { readAIConnections } from './connection-status.mjs';
 
 const [action, backendRoot, input] = process.argv.slice(2);
 const registry = new Registry();
@@ -50,7 +51,7 @@ async function status() {
     desiredRunning: connection.desiredRunning ?? observed.state === 'healthy',
     connectionRemembered: connection.desiredRunning !== null,
     gatewayID: config?.id, roots: (config?.roots ?? []).filter(root => root.enabled && registry.available(root)), configuredMCPURL: config?.configuredMCPURL,
-    transport, transportSetup };
+    transport, transportSetup, aiConnections: readAIConnections(registry.directory, config?.id) };
 }
 try {
   if (action === 'daemon') {

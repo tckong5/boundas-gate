@@ -46,7 +46,7 @@ struct ConnectionGuidance {
             return .init(title: "Mac 已準備好，下一步設定 ChatGPT", message: "跟住引導複製地址、完成配對，再試一次讀取檔案。已經設定過亦可以用引導確認。",
                          button: "帶我設定 ChatGPT…", action: .setup, needsAttention: false)
         case .matches:
-            return .init(title: "Mac 連線正常", message: "地址同你確認過嘅 ChatGPT 設定一致。如果 ChatGPT 仍然連唔到，可以用引導再設定同測試。",
+            return .init(title: "Gate Open", message: "地址同你確認過嘅 ChatGPT 設定一致。如果 ChatGPT 仍然連唔到，可以用引導再設定同測試。",
                          button: "ChatGPT 仍然連唔到？", action: .setup, needsAttention: false)
         }
     }
@@ -86,7 +86,7 @@ struct ConnectionSetupProgress {
 enum ConnectionSupportReport {
     static func make(workspace: WorkspaceRecord, status: WorkspaceStatus?, diagnostics: ConnectionDiagnostics?) -> String {
         var lines = ["Boundas Gate 連線求助資料", "時間：\(Date().ISO8601Format())",
-                     "Workspace：\(workspace.name)", "Workspace ID：\(workspace.c2cID)",
+                     "Folder：\(workspace.name)", "Folder ID：\(workspace.c2cID)",
                      "本機程序：\(status?.running.map { $0 ? "運行中" : "已停止" } ?? "未確認")",
                      "Port：\(status?.port.map(String.init) ?? "未確認")",
                      "地址：\(EndpointAddress.mcpURL(status?.mcpURL) ?? "未取得")"]

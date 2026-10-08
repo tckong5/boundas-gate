@@ -4,10 +4,16 @@ struct ConnectionCheck: Equatable {
     enum State { case passed, failed, notChecked }
     let state: State
     let detail: String
+    var isDNSFailure = false
     var passed: Bool { state == .passed }
 
     static func success(_ detail: String) -> Self { .init(state: .passed, detail: detail) }
-    static func failure(_ detail: String) -> Self { .init(state: .failed, detail: detail) }
+    static func failure(_ detail: String, error: Error? = nil) -> Self {
+        let cause = error as NSError?
+        let dnsFailure = cause?.domain == NSURLErrorDomain
+            && [URLError.cannotFindHost.rawValue, URLError.dnsLookupFailed.rawValue].contains(cause?.code ?? 0)
+        return .init(state: .failed, detail: detail, isDNSFailure: dnsFailure)
+    }
     static func pending(_ detail: String) -> Self { .init(state: .notChecked, detail: detail) }
 }
 
@@ -21,6 +27,9 @@ struct ConnectionDiagnostics {
 
     var isUsable: Bool {
         bridge.passed && localMCP.passed && publicEndpoint.passed && publicMCP.passed && address.passed
+    }
+    var hasPublicDNSFailure: Bool {
+        bridge.passed && localMCP.passed && (publicEndpoint.isDNSFailure || publicMCP.isDNSFailure)
     }
 }
 
@@ -130,7 +139,7 @@ struct ConnectionChecker {
             guard body.workspaceId == workspaceID else { return .failure("端點連到另一個 workspace") }
             return .success("可連通，workspace ID 已核對")
         } catch {
-            return .failure("未能連通：\(error.localizedDescription)")
+            return .failure("未能連通：\(error.localizedDescription)", error: error)
         }
     }
 
@@ -157,7 +166,7 @@ struct ConnectionChecker {
             }
             return .success("401 正常，OAuth discovery URL 已核對")
         } catch {
-            return .failure("MCP 未能連通：\(error.localizedDescription)")
+            return .failure("MCP 未能連通：\(error.localizedDescription)", error: error)
         }
     }
 

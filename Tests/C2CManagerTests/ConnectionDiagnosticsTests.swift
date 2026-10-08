@@ -171,6 +171,20 @@ final class ConnectionDiagnosticsTests: XCTestCase {
         XCTAssertFalse(result.isUsable)
     }
 
+    func testPublicDNSFailureDoesNotImplyLocalBridgeOrLoginFailure() async {
+        for code in [URLError.Code.cannotFindHost, .dnsLookupFailed] {
+            let result = await check { request in
+                if request.url!.host == "current.trycloudflare.com" { throw URLError(code) }
+                return self.healthy(request)
+            }
+            XCTAssertTrue(result.bridge.passed)
+            XCTAssertTrue(result.localMCP.passed)
+            XCTAssertTrue(result.publicEndpoint.isDNSFailure)
+            XCTAssertTrue(result.hasPublicDNSFailure)
+            XCTAssertFalse(result.isUsable)
+        }
+    }
+
     func testNetworkTimeoutFailsWithoutTrustingProcessState() async {
         let result = await check { request in
             if request.url!.host == "current.trycloudflare.com" { throw URLError(.timedOut) }
@@ -178,6 +192,7 @@ final class ConnectionDiagnosticsTests: XCTestCase {
         }
         XCTAssertTrue(result.bridge.passed)
         XCTAssertEqual(result.publicEndpoint.state, .failed)
+        XCTAssertFalse(result.hasPublicDNSFailure)
         XCTAssertFalse(result.isUsable)
     }
 

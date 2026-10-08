@@ -193,7 +193,7 @@ final class WorkspaceStore: ObservableObject {
     func setConnectorURL(_ workspace: WorkspaceRecord, to value: String) {
         guard operableSideGate(workspace) != nil else { return }
         guard let normalized = EndpointAddress.mcpURL(value), normalized.hasPrefix("https://") else {
-            alertMessage = "請貼上 ChatGPT connector 入面嘅 HTTPS Server URL（/mcp）。"
+            alertMessage = "請貼上 MCP Connection 入面嘅 HTTPS Server URL（/mcp）。"
             return
         }
         guard let index = workspaces.firstIndex(where: { $0.id == workspace.id }) else { return }

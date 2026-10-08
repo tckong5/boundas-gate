@@ -16,7 +16,7 @@ export class Registry {
   ensure() {
     const existing = this.read();
     if (existing) return existing;
-    const config = { id: randomBytes(6).toString('hex'), roots: [] };
+    const config = { id: randomBytes(6).toString('hex'), roots: [], sharedIngress: true };
     secureWrite(path.join(this.directory, 'config.json'), config);
     return config;
   }
@@ -38,7 +38,7 @@ export class Registry {
     catch { return []; } // Never use a stale allowlist when its file is missing or invalid.
   }
   available(root, added = this.addedFolders()) {
-    return root.enabled && added.some(item => typeof item.id === 'string' && item.id.toLowerCase() === root.sourceID.toLowerCase() && item.c2cID === root.id && item.path === root.path);
+    return root.enabled && added.some(item => item.mainGateAdded !== false && typeof item.id === 'string' && item.id.toLowerCase() === root.sourceID.toLowerCase() && item.c2cID === root.id && item.path === root.path);
   }
   active() { const added = this.addedFolders(); return (this.read()?.roots ?? []).filter(root => this.available(root, added)); }
   connection() {
@@ -47,13 +47,14 @@ export class Registry {
     if (stableMCPURL) {
       const url = new URL(stableMCPURL);
       if (url.protocol !== 'https:' || !/^[a-z0-9-]+(?:\.[a-z0-9-]+)+\.ts\.net$/.test(url.hostname)
-          || url.port || url.username || url.password || url.search || url.hash || url.pathname !== `/c2c/${config.id}/mcp`) {
+          || url.port || url.username || url.password || url.search || url.hash || !['/mcp', `/c2c/${config.id}/mcp`].includes(url.pathname)) {
         throw new Error('已儲存嘅固定地址無效；未有更改連線或授權。');
       }
     }
     if (config?.desiredRunning !== undefined && typeof config.desiredRunning !== 'boolean'
-        || config?.reconnectEnabled !== undefined && typeof config.reconnectEnabled !== 'boolean') throw new Error('自動重連設定無效。');
-    return { stableMCPURL, desiredRunning: config?.desiredRunning ?? null, reconnectEnabled: config?.reconnectEnabled ?? true };
+        || config?.reconnectEnabled !== undefined && typeof config.reconnectEnabled !== 'boolean'
+        || config?.localOnly !== undefined && typeof config.localOnly !== 'boolean') throw new Error('自動重連設定無效。');
+    return { stableMCPURL, desiredRunning: config?.desiredRunning ?? null, reconnectEnabled: config?.reconnectEnabled ?? true, localOnly: config?.localOnly ?? false };
   }
   updateConnection(values) {
     const config = this.read();
@@ -63,22 +64,23 @@ export class Registry {
       throw new Error('固定地址同原有 ChatGPT 設定唔一致；未有更改地址或授權。');
     }
     if (values.desiredRunning !== undefined && typeof values.desiredRunning !== 'boolean'
-        || values.reconnectEnabled !== undefined && typeof values.reconnectEnabled !== 'boolean') throw new Error('自動重連設定無效。');
+        || values.reconnectEnabled !== undefined && typeof values.reconnectEnabled !== 'boolean'
+        || values.localOnly !== undefined && typeof values.localOnly !== 'boolean') throw new Error('自動重連設定無效。');
     if (values.stableMCPURL) {
       const url = new URL(values.stableMCPURL);
       if (url.protocol !== 'https:' || !/^[a-z0-9-]+(?:\.[a-z0-9-]+)+\.ts\.net$/.test(url.hostname)
-          || url.port || url.username || url.password || url.search || url.hash || url.pathname !== `/c2c/${config.id}/mcp`) throw new Error('固定地址無效。');
+          || url.port || url.username || url.password || url.search || url.hash || !['/mcp', `/c2c/${config.id}/mcp`].includes(url.pathname)) throw new Error('固定地址無效。');
     }
     secureWrite(path.join(this.directory, 'config.json'), { ...config, ...values });
   }
   configure(selected, Workspace) {
     if (!Array.isArray(selected) || selected.length > 200) throw new Error('Folder 清單無效。');
     const added = this.addedFolders();
-    const previous = this.read() ?? { id: randomBytes(6).toString('hex'), roots: [] };
+    const previous = this.read() ?? { id: randomBytes(6).toString('hex'), roots: [], sharedIngress: true };
     const enabled = selected.map(sourceID => {
       if (typeof sourceID !== 'string') throw new Error('Folder ID 無效。');
       const item = added.find(folder => typeof folder.id === 'string' && folder.id.toLowerCase() === sourceID.toLowerCase());
-      if (!item) throw new Error('只可以共用已經 Add Folder 嘅資料夾。');
+      if (!item || item.mainGateAdded === false) throw new Error('只可以共用已加入 Main Gate 嘅 Folder。');
       const workspace = new Workspace(item.path);
       if (workspace.root !== item.path || workspace.id !== item.c2cID) throw new Error('Folder 位置變咗，請重新加入。');
       const old = previous.roots.find(root => root.id === workspace.id);

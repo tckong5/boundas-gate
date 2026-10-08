@@ -9,6 +9,7 @@ import http from 'node:http';
 import { promisify } from 'node:util';
 import { Registry, secureWrite } from '../../Resources/Gateway/registry.mjs';
 import { FolderAccess } from '../../Resources/Gateway/access.mjs';
+import { SideRegistry } from '../../Resources/Gateway/side-registry.mjs';
 import { proxyPath } from '../../Resources/Tailscale/provider.mjs';
 import { loadBackend, startGateway } from '../../Resources/Gateway/server.mjs';
 
@@ -86,6 +87,31 @@ test('active registry reads the Folder allowlist once per operation', () => {
     secureWrite(f.allowlistFile, [f.roots[0]]);
     assert.equal(f.registry.active().length, 1); assert.equal(reads, 2);
   } finally { f.clean(); }
+});
+test('Side-only membership denies Main Gate access and preserves Folder passcode policy', async () => {
+  const f = fixture(); f.select(0, 1);
+  f.registry.setCodePolicy(f.roots[0].c2cID, true);
+  const policy = f.registry.read().roots.find(root => root.id === f.roots[0].c2cID);
+  const gateway = await server(f);
+  try {
+    const tokens = await authorize(gateway, await pair(gateway));
+    const moved = { ...f.roots[0], mainGateAdded: false, sideGateAdded: true };
+    secureWrite(f.allowlistFile, [moved, f.roots[1], { ...f.roots[2], mainGateAdded: false, sideGateAdded: true }]);
+    assert.deepEqual(f.registry.active().map(root => root.id), [f.roots[1].c2cID]);
+    assert.throws(() => f.registry.configure([moved.id], backend.Workspace), /Main Gate/);
+    assert.throws(() => f.registry.configure([f.roots[2].id], backend.Workspace), /Main Gate/);
+    const denied = await read(gateway, tokens, moved.c2cID);
+    assert.equal(denied.isError, true);
+    assert.equal(data(await read(gateway, tokens, f.roots[1].c2cID)).content, 'B read test');
+    f.registry.revokeSource(moved.id);
+    const side = new SideRegistry(f.registry, moved.id, path.join(f.directory, 'side'));
+    side.ensure();
+    assert.equal(side.active()[0].codeRequired, true);
+    assert.equal(side.active()[0].codeEpoch, policy.codeEpoch);
+    assert.equal(f.registry.read().roots.find(root => root.id === moved.c2cID).enabled, false);
+    assert.equal(f.registry.read().roots.find(root => root.id === f.roots[1].c2cID).enabled, true);
+    assert.equal(f.registry.addedFolders().length, 3);
+  } finally { await gateway.close(); f.clean(); }
 });
 test('OAuth consent uses Boundas Gate and the registered AI name without changing authorization', async () => {
   const f = fixture(); f.select(0); const gateway = await server(f);
@@ -329,7 +355,11 @@ test('connection preferences preserve grants and reject replacement addresses', 
     f.registry.updateConnection({ stableMCPURL: mcpURL, desiredRunning: true });
     f.registry.updateConnection({ desiredRunning: false, reconnectEnabled: false });
     assert.deepEqual(f.registry.read().roots, initial.roots);
-    assert.deepEqual(f.registry.connection(), { stableMCPURL: mcpURL, desiredRunning: false, reconnectEnabled: false });
+    assert.deepEqual(f.registry.connection(), { stableMCPURL: mcpURL, desiredRunning: false, reconnectEnabled: false, localOnly: false });
+    f.registry.updateConnection({ localOnly: true });
+    assert.equal(f.registry.connection().localOnly, true);
+    assert.throws(() => f.registry.updateConnection({ localOnly: 'true' }), /設定無效/);
+    assert.deepEqual(f.registry.read().roots, initial.roots);
     assert.throws(() => f.registry.updateConnection({ stableMCPURL: `https://other.example.ts.net/c2c/${initial.id}/mcp` }), /固定地址/);
     assert.equal(f.registry.connection().stableMCPURL, mcpURL);
   } finally { f.clean(); }
@@ -681,6 +711,195 @@ test('real Main and Side Gates enforce separate OAuth, decommission, re-add and 
   } finally {
     for (const child of children) if (child.exitCode === null) child.kill('SIGTERM');
     await Promise.all(children.map(child => child.exitCode !== null ? Promise.resolve() : new Promise(resolve => child.once('exit', resolve))));
+    await gateway.close(); f.clean();
+  }
+});
+
+test('setup correlation persists across restart and cancellation never revokes completed or unrelated authorization', async () => {
+  const f = fixture(); f.select(); let gateway = await server(f);
+  try {
+    const completed = await pair(gateway);
+    assert.match(completed.sessionID, /^[a-f0-9]{32}$/);
+    const tokens = await authorize(gateway, completed);
+    const client = gateway.authStore.getClient(tokens.client_id);
+    assert.equal(client.pairingSessionID, completed.sessionID);
+    assert.equal(client.authorizationSessionID, completed.sessionID);
+    const summary = (await import('../../Resources/Gateway/connection-status.mjs')).readAIConnections(f.registry.directory, gateway.id);
+    assert.equal(summary.find(row => row.clientID === tokens.client_id).authorizationSessionID, completed.sessionID);
+    assert.equal(JSON.stringify(summary).includes(completed.pairingCode), false);
+    const cancelCompleted = await control(gateway, '/control/cancel-setup', { sessionIDs: [completed.sessionID] });
+    assert.equal(cancelCompleted.status, 409);
+    assert.equal(gateway.authStore.verifyAccessToken(tokens.access_token).ok, true);
+    const unfinished = await pair(gateway);
+    const unauthenticated = await fetch(`${gateway.localBase()}/control/cancel-setup`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionIDs: [unfinished.sessionID] }) });
+    assert.equal(unauthenticated.status, 404);
+    assert.equal((await control(gateway, '/control/cancel-setup', { sessionIDs: [unfinished.sessionID] })).status, 200);
+    assert.equal(gateway.pairing.verify(unfinished.pairingCode).ok, false);
+    const another = await pair(gateway);
+    assert.equal((await control(gateway, '/control/cancel-setup', { sessionIDs: [unfinished.sessionID] })).status, 200);
+    assert.equal(gateway.pairing.hasActiveSession(), true);
+    assert.equal(gateway.pairing.verify(another.pairingCode).ok, true);
+    assert.equal(gateway.authStore.verifyAccessToken(tokens.access_token).ok, true);
+    await gateway.close(); gateway = await server(f);
+    assert.equal(gateway.authStore.getClient(tokens.client_id).authorizationSessionID, completed.sessionID);
+    assert.equal(gateway.authStore.verifyAccessToken(tokens.access_token).ok, true);
+    assert.equal(f.registry.active().length, 0);
+  } finally { await gateway.close(); f.clean(); }
+});
+
+test('a background refresh cannot finish a new setup and cancellation removes only its pending code', async () => {
+  const f = fixture(); f.select(); const gateway = await server(f);
+  try {
+    const previous = await pair(gateway);
+    const tokens = await authorize(gateway, previous);
+    const pending = await pair(gateway);
+    assert.equal(gateway.pairing.verify(pending.pairingCode).ok, true);
+    const pendingCode = gateway.authStore.createAuthorizationCode({ clientId: tokens.client_id,
+      redirectUri: 'https://example.test/callback', codeChallenge: backend.base64UrlSha256('x'.repeat(64)),
+      scopes: ['workspace.read', 'offline_access'], pairingSessionId: pending.sessionID });
+    const refreshed = gateway.authStore.refresh(tokens.refresh_token, tokens.client_id);
+    assert.equal(refreshed.ok, true);
+    const client = gateway.authStore.getClient(tokens.client_id);
+    assert.equal(client.pairingSessionID, pending.sessionID);
+    assert.equal(client.authorizationSessionID, previous.sessionID);
+    assert.equal((await control(gateway, '/control/cancel-setup', { sessionIDs: [pending.sessionID] })).status, 200);
+    assert.equal(gateway.authStore.consumeAuthorizationCode(pendingCode), null);
+    assert.equal(gateway.authStore.verifyAccessToken(refreshed.tokens.accessToken).ok, true);
+    assert.equal(gateway.authStore.getClient(tokens.client_id).authorizationSessionID, previous.sessionID);
+    assert.equal((await control(gateway, '/control/cancel-setup', { sessionIDs: ['invalid'] })).status, 409);
+  } finally { await gateway.close(); f.clean(); }
+});
+
+test('setup completion follows the exchanged code, not the latest code for the same client', async () => {
+  const f = fixture(); f.select(); const gateway = await server(f);
+  try {
+    const client = gateway.authStore.registerClient({ clientName: 'Claude', redirectUris: ['https://example.test/callback'] });
+    const first = await pair(gateway);
+    assert.equal(gateway.pairing.verify(first.pairingCode).ok, true);
+    const input = { clientId: client.clientId, redirectUri: client.redirectUris[0],
+      codeChallenge: backend.base64UrlSha256('x'.repeat(64)), scopes: ['workspace.read', 'offline_access'] };
+    const firstCode = gateway.authStore.createAuthorizationCode({ ...input, pairingSessionId: first.sessionID });
+    const second = await pair(gateway);
+    assert.equal(gateway.pairing.verify(second.pairingCode).ok, true);
+    const secondCode = gateway.authStore.createAuthorizationCode({ ...input, pairingSessionId: second.sessionID });
+    const firstRecord = gateway.authStore.consumeAuthorizationCode(firstCode);
+    const tokens = gateway.authStore.issueTokens({ clientId: client.clientId, scopes: firstRecord.scopes });
+    assert.equal(client.pairingSessionID, second.sessionID);
+    assert.equal(client.authorizationSessionID, first.sessionID);
+    assert.equal((await control(gateway, '/control/cancel-setup', { sessionIDs: [first.sessionID] })).status, 409);
+    assert.equal((await control(gateway, '/control/cancel-setup', { sessionIDs: [second.sessionID] })).status, 200);
+    assert.equal(gateway.authStore.consumeAuthorizationCode(secondCode), null);
+    assert.equal(gateway.authStore.verifyAccessToken(tokens.accessToken).ok, true);
+  } finally { await gateway.close(); f.clean(); }
+});
+
+test('cancel cleans a correlated never-authorized registration but leaves uncorrelated registrations alone', async () => {
+  const f = fixture(); f.select(); let gateway = await server(f);
+  try {
+    const uncorrelated = gateway.authStore.registerClient({ clientName: 'Unrelated', redirectUris: ['https://example.test/callback'] });
+    const client = gateway.authStore.registerClient({ clientName: 'Claude', redirectUris: ['https://example.test/callback'] });
+    const pairing = await pair(gateway);
+    assert.equal(gateway.pairing.verify(pairing.pairingCode).ok, true);
+    const code = gateway.authStore.createAuthorizationCode({ clientId: client.clientId, redirectUri: client.redirectUris[0],
+      codeChallenge: backend.base64UrlSha256('x'.repeat(64)), scopes: ['workspace.read'], pairingSessionId: pairing.sessionID });
+    assert.equal((await control(gateway, '/control/cancel-setup', { sessionIDs: [pairing.sessionID] })).status, 200);
+    assert.equal(gateway.authStore.getClient(client.clientId), undefined);
+    assert.equal(gateway.authStore.consumeAuthorizationCode(code), null);
+    assert.ok(gateway.authStore.getClient(uncorrelated.clientId));
+    await gateway.close(); gateway = await server(f);
+    assert.equal(gateway.authStore.getClient(client.clientId), undefined);
+    assert.ok(gateway.authStore.getClient(uncorrelated.clientId));
+  } finally { await gateway.close(); f.clean(); }
+});
+
+test('local activity feed follows real authorized tools, redacts payloads and records denial', async () => {
+  const f = fixture(); f.select(0, 1); const gateway = await server(f);
+  const activityURL = `${gateway.localBase()}/control/activity`;
+  const feed = async (suffix = '') => fetch(activityURL + suffix, { headers: {
+    Authorization: `Bearer ${gateway.adminToken}`, 'X-Boundas-Gate-Instance': gateway.instanceID } });
+  try {
+    assert.equal((await fetch(activityURL)).status, 404);
+    assert.equal(proxyPath('/private/bridge/control/activity', 'private'), null);
+    assert.equal((await fetch(activityURL, { headers: { Authorization: `Bearer ${gateway.adminToken}`, 'X-Forwarded-For': '1.2.3.4' } })).status, 404);
+    for (const query of ['?since=no', '?since=-1', '?since=9007199254740999', '?since=1&since=2']) {
+      assert.equal((await feed(query)).status, 400);
+    }
+    const baselineResponse = await feed();
+    assert.equal(baselineResponse.headers.get('cache-control'), 'no-store');
+    const baseline = await baselineResponse.json();
+    assert.equal(baseline.reset, true); assert.deepEqual(baseline.events, []);
+    const tokens = await authorize(gateway, await pair(gateway));
+    assert.equal((await fetch(activityURL, { headers: { Authorization: `Bearer ${tokens.access_token}` } })).status, 404);
+    await Promise.all([
+      read(gateway, tokens, f.roots[0].c2cID),
+      rpc(gateway, tokens.access_token, 'search_workspace', { workspace_id: f.roots[1].c2cID, query: 'SECRET-QUERY-PAYLOAD' }),
+      read(gateway, tokens, f.roots[0].c2cID, 'PRIVATE-FILENAME')
+    ]);
+    const activity = await (await feed(`?since=${baseline.cursor}`)).json();
+    const started = activity.events.filter(e => e.type === 'requestStarted');
+    const finished = activity.events.filter(e => e.type === 'requestFinished');
+    assert.equal(started.length, 3); assert.equal(finished.length, 3);
+    assert.equal(new Set(started.map(e => e.requestID)).size, 3);
+    assert.ok(started.every(e => e.clientID === tokens.client_id && e.gateID === gateway.id));
+    assert.ok(finished.some(e => e.success === false));
+    assert.ok(finished.some(e => e.success === true));
+    assert.ok(started.some(e => e.tool === 'Search' && e.workspaceID === f.roots[1].c2cID));
+    const json = JSON.stringify(activity);
+    for (const secret of ['hello.txt', 'PRIVATE-FILENAME', 'SECRET-QUERY-PAYLOAD', 'A read test', tokens.access_token, tokens.refresh_token]) {
+      assert.ok(!json.includes(secret));
+    }
+    assert.deepEqual(activity.activeRequests, []);
+    assert.deepEqual(activity.folders.map(f => f.available), [true, true]);
+    const cursor = activity.cursor;
+    f.registry.setCodePolicy(f.roots[0].c2cID, true);
+    assert.equal((await read(gateway, tokens, f.roots[0].c2cID)).isError, true);
+    const denied = await (await feed(`?since=${cursor}`)).json();
+    assert.equal(denied.events.at(-1).type, 'requestFinished');
+    assert.equal(denied.events.at(-1).success, false);
+    assert.deepEqual((await (await feed()).json()).events, []);
+  } finally { await gateway.close(); f.clean(); }
+});
+
+test('real overlapping tools remain active independently until actual completion', async () => {
+  const f = fixture(); f.select(0, 1); const gateway = await server(f);
+  const original = backend.Workspace.prototype.readFile;
+  let releaseA, releaseB, notify;
+  const a = new Promise(resolve => { releaseA = resolve; });
+  const b = new Promise(resolve => { releaseB = resolve; });
+  const began = new Promise(resolve => { notify = resolve; });
+  let starts = 0;
+  const feed = async since => (await fetch(`${gateway.localBase()}/control/activity${since === undefined ? '' : `?since=${since}`}`,
+    { headers: { Authorization: `Bearer ${gateway.adminToken}` } })).json();
+  try {
+    const tokens = await authorize(gateway, await pair(gateway));
+    const baseline = await feed();
+    backend.Workspace.prototype.readFile = async function (...args) {
+      if (++starts === 2) notify();
+      await (this.id === f.roots[0].c2cID ? a : b);
+      return original.apply(this, args);
+    };
+    const pendingA = read(gateway, tokens, f.roots[0].c2cID);
+    const pendingB = read(gateway, tokens, f.roots[1].c2cID);
+    await began;
+    const active = await feed(baseline.cursor);
+    assert.equal(active.activeRequests.length, 2);
+    assert.equal(active.events.filter(e => e.type === 'requestFinished').length, 0);
+    const requestA = active.activeRequests.find(e => e.workspaceID === f.roots[0].c2cID);
+    const requestB = active.activeRequests.find(e => e.workspaceID === f.roots[1].c2cID);
+    assert.notEqual(requestA.requestID, requestB.requestID);
+    releaseB(); await pendingB;
+    const midway = await feed(active.cursor);
+    assert.deepEqual(midway.activeRequests.map(e => e.requestID), [requestA.requestID]);
+    assert.equal(midway.events[0].requestID, requestB.requestID);
+    assert.equal(midway.events[0].type, 'requestFinished');
+    releaseA(); await pendingA;
+    const complete = await feed(midway.cursor);
+    assert.deepEqual(complete.activeRequests, []);
+    assert.equal(complete.events[0].requestID, requestA.requestID);
+    assert.equal(complete.events[0].success, true);
+  } finally {
+    releaseA(); releaseB(); backend.Workspace.prototype.readFile = original;
     await gateway.close(); f.clean();
   }
 });

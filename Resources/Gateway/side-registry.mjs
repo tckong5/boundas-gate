@@ -14,10 +14,28 @@ export class SideRegistry {
   }
   ensure() {
     const record = this.record();
+    if (record.c2cID === this.main.ensure().id) throw new Error('Main / Side Gate identity collision.');
     this.main.ensureFolderPolicy(record);
     let config; try { config = JSON.parse(fs.readFileSync(path.join(this.directory, 'config.json'), 'utf8')); }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
-    if (!config) secureWrite(path.join(this.directory, 'config.json'), { id: record.c2cID, epoch: randomBytes(16).toString('hex') });
+    const endpoint = config?.stableMCPURL ?? config?.configuredMCPURL ?? record.configuredMCPURL ?? record.lastObservedMCPURL;
+    const tailscale = record.connectionProvider === 'tailscale' || (() => {
+      try { return new URL(endpoint).hostname.endsWith('.ts.net'); } catch { return false; }
+    })();
+    const cloudflare = record.connectionProvider === 'cloudflare' || endpoint && !tailscale;
+    const inferred = cloudflare ? 'cloudflare' : tailscale ? 'external' : undefined;
+    if (!config) {
+      secureWrite(path.join(this.directory, 'config.json'), { id: record.c2cID, epoch: randomBytes(16).toString('hex'),
+        transport: inferred ?? 'shared',
+        ...(!cloudflare && endpoint ? { stableMCPURL: endpoint } : {}), localOnly: !endpoint });
+    } else if (!endpoint && [undefined, 'embedded'].includes(config.transport)) {
+      secureWrite(path.join(this.directory, 'config.json'), { ...config, transport: 'shared' });
+    } else if (config.transport === undefined && inferred) {
+      // Import legacy provider evidence without changing its identity or epoch.
+      if (config.id !== record.c2cID || !/^[a-f0-9]{32}$/.test(config.epoch)) throw new Error('Side Gate 設定無效。');
+      secureWrite(path.join(this.directory, 'config.json'), { ...config, transport: inferred,
+        ...(!cloudflare && endpoint ? { stableMCPURL: endpoint } : {}) });
+    }
     return this.read();
   }
   read() {
@@ -30,14 +48,23 @@ export class SideRegistry {
       enabled: true, epoch: state.epoch, codeRequired: policy.codeRequired ?? false, codeEpoch: policy.codeEpoch }] };
   }
   active() { try { return this.read().roots; } catch { return []; } }
-  connection() { const state = this.read(); return { stableMCPURL: state.stableMCPURL ?? null }; }
+  connection() {
+    const state = this.read();
+    return { stableMCPURL: state.transport === 'cloudflare' ? null : state.stableMCPURL ?? null,
+      desiredRunning: typeof state.desiredRunning === 'boolean' ? state.desiredRunning : null,
+      localOnly: state.localOnly ?? !state.stableMCPURL, reconnectEnabled: state.reconnectEnabled !== false,
+      connectionVersion: 1 };
+  }
   updateConnection(values) {
     const file = path.join(this.directory, 'config.json');
     const current = JSON.parse(fs.readFileSync(file, 'utf8'));
     // Quick Tunnel remains temporary. Fixed endpoints stay bound to the Gate.
-    const record = this.record();
-    if (record.connectionProvider === 'tailscale' && current.stableMCPURL && values.stableMCPURL !== current.stableMCPURL) throw new Error('Side Gate 固定地址不符，未有改動授權。');
-    secureWrite(file, { ...current, ...(record.connectionProvider === 'tailscale' ? values : {}) });
+    this.record();
+    if (current.transport !== 'cloudflare' && current.stableMCPURL && values.stableMCPURL !== undefined
+        && values.stableMCPURL !== current.stableMCPURL) throw new Error('Side Gate 固定地址不符，未有改動授權。');
+    const update = { ...values };
+    if (current.transport === 'cloudflare') delete update.stableMCPURL;
+    secureWrite(file, { ...current, ...update });
   }
   requireConnection(scopes) {
     // Legacy Side tokens carry operation scopes only. Bearer middleware verifies

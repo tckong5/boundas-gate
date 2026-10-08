@@ -5,13 +5,36 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { Registry, secureWrite } from '../../Resources/Gateway/registry.mjs';
-import { transportMode, EmbeddedProvider, embeddedLocation, embeddedRequest, embeddedSetup, tunnelAccount } from '../../Resources/Tailscale/embedded.mjs';
+import { transportMode, EmbeddedProvider, embeddedLocation, embeddedRequest, embeddedSetup, tunnelAccount, sharedAgent } from '../../Resources/Tailscale/embedded.mjs';
 function fixture() {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'boundas-mode-'));
   const registry = new Registry({ directory });
   secureWrite(path.join(directory, 'config.json'), { id: 'abcdef123456', roots: [] });
   return { registry, clean: () => fs.rmSync(directory, { recursive: true, force: true }) };
 }
+test('shared helper upgrade verifies Main lifetime before sending any admin credential', async () => {
+  const f = fixture(); const location = embeddedLocation(f.registry); let ipc, reusedPort;
+  const requests = [];
+  try {
+    f.registry.updateConnection({ transport: 'embedded' });
+    reusedPort = http.createServer((req, res) => {
+      requests.push({ path: req.url, authorization: req.headers.authorization });
+      res.end(JSON.stringify({ service: 'boundas-gateway', workspaceId: 'aaaaaa123456', instanceID: 'a'.repeat(64), status: 'ok' }));
+    });
+    await new Promise(resolve => reusedPort.listen(0, '127.0.0.1', resolve));
+    secureWrite(path.join(f.registry.directory, 'runtime.json'), { workspaceId: f.registry.read().id, instanceID: 'b'.repeat(64),
+      adminToken: `bg_admin_${'c'.repeat(64)}`, port: reusedPort.address().port, pid: process.pid });
+    fs.mkdirSync(location.controlDirectory, { mode: 0o700 });
+    ipc = http.createServer((_req, res) => res.end(JSON.stringify({ ok: true, service: 'boundas-tsnet', gatewayID: f.registry.read().id,
+      state: 'ready', running: true, publicUrl: `https://old.example.ts.net/c2c/${f.registry.read().id}` })));
+    await new Promise(resolve => ipc.listen(location.socket, resolve)); fs.chmodSync(location.socket, 0o600);
+    await assert.rejects(sharedAgent(f.registry, { binary: '/helper' }), /未有傳送管理憑證/);
+    assert.deepEqual(requests, [{ path: '/health', authorization: undefined }]);
+  } finally {
+    for (const server of [ipc, reusedPort]) if (server) { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
+    fs.rmSync(location.controlDirectory, { recursive: true, force: true }); f.clean();
+  }
+});
 test('external account actions retain the Mac profile and require explicit shared-device logout confirmation', async () => {
   const f = fixture(); const calls = [];
   const url = 'https://old.example.ts.net/c2c/abcdef123456/mcp';
@@ -96,6 +119,48 @@ test('interactive login is requested after a delayed startup transition and reus
     assert.equal(first.loginURL, 'https://login.tailscale.com/a/test');
     const again = await embeddedSetup(f.registry, { start: true, binary: '/bundled/helper' });
     assert.equal(again.loginURL, first.loginURL); assert.equal(loginRequests, 1);
+  } finally {
+    if (server) await new Promise(resolve => server.close(resolve));
+    fs.rmSync(location.controlDirectory, { recursive: true, force: true }); f.clean();
+  }
+});
+test('explicit Sign In requests the login URL again while background checks remain non-interactive', async () => {
+  const f = fixture(); const location = embeddedLocation(f.registry); let server;
+  let loginRequests = 0;
+  try {
+    secureWrite(path.join(f.registry.directory, 'config.json'), { ...f.registry.read(), transport: 'embedded' });
+    fs.mkdirSync(location.controlDirectory, { mode: 0o700 });
+    server = http.createServer((req, res) => {
+      if (req.url === '/login') loginRequests++;
+      res.end(JSON.stringify({ ok: true, service: 'boundas-tsnet', gatewayID: f.registry.read().id,
+        state: 'login', userspace: true, loginManagementVersion: 2,
+        loginURL: `https://login.tailscale.com/a/${loginRequests ? 'current' : 'old'}` }));
+    });
+    await new Promise(resolve => server.listen(location.socket, resolve)); fs.chmodSync(location.socket, 0o600);
+    await embeddedSetup(f.registry, { start: true, requestLogin: false, binary: '/helper' });
+    assert.equal(loginRequests, 0);
+    const first = await tunnelAccount(f.registry, 'login', { binary: '/helper' });
+    assert.equal(loginRequests, 1);
+    assert.equal(first.loginURL, 'https://login.tailscale.com/a/current');
+    await tunnelAccount(f.registry, 'login', { binary: '/helper' });
+    assert.equal(loginRequests, 2);
+  } finally {
+    if (server) await new Promise(resolve => server.close(resolve));
+    fs.rmSync(location.controlDirectory, { recursive: true, force: true }); f.clean();
+  }
+});
+test('Sign In reports a missing login URL as a failure instead of silent success', async () => {
+  const f = fixture(); const location = embeddedLocation(f.registry); let server;
+  try {
+    secureWrite(path.join(f.registry.directory, 'config.json'), { ...f.registry.read(), transport: 'embedded' });
+    fs.mkdirSync(location.controlDirectory, { mode: 0o700 });
+    server = http.createServer((req, res) => {
+      res.statusCode = req.url === '/login' ? 409 : 200;
+      res.end(JSON.stringify({ ok: req.url !== '/login', service: 'boundas-tsnet', gatewayID: f.registry.read().id,
+        state: 'login', userspace: true, loginManagementVersion: 2, message: '未能取得 Tailscale 登入網址。' }));
+    });
+    await new Promise(resolve => server.listen(location.socket, resolve)); fs.chmodSync(location.socket, 0o600);
+    await assert.rejects(tunnelAccount(f.registry, 'login', { binary: '/helper' }), /未能取得 Tailscale 登入網址/);
   } finally {
     if (server) await new Promise(resolve => server.close(resolve));
     fs.rmSync(location.controlDirectory, { recursive: true, force: true }); f.clean();

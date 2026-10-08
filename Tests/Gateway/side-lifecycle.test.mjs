@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { decommissionSide, sideRecord, sideAccessAllowed } from '../../Resources/Gateway/side-lifecycle.mjs';
 import { Registry, secureWrite } from '../../Resources/Gateway/registry.mjs';
+import { SideRegistry } from '../../Resources/Gateway/side-registry.mjs';
 import { retireRoutes } from '../../Resources/Tailscale/provider.mjs';
 
 function fixture() {
@@ -74,4 +75,27 @@ test('route retirement leaves Main and other Side handlers untouched and rejects
     assert.ok(config.Web[key].Handlers[other]);
     assert.deepEqual(JSON.parse(fs.readFileSync(path.join(directory, 'routes.json'))), { [`${key}${other}`]: ledger[`${key}${other}`] });
   } finally { f.clean(); }
+});
+
+
+test('legacy Side provider and epoch are preserved; fresh Side Gates inherit bundled transport', () => {
+  for (const example of [
+    { endpoint: 'https://side.example.org/mcp', transport: 'cloudflare' },
+    { endpoint: 'https://mac.example.ts.net/c2c/abcdef123456/mcp', transport: 'external' },
+    { endpoint: undefined, transport: 'shared' },
+  ]) {
+    const f = fixture();
+    try {
+      secureWrite(f.registry.allowlistFile, [{ ...f.record, name: 'Folder', configuredMCPURL: example.endpoint }]);
+      const side = new SideRegistry(f.registry, f.record.id, path.join(f.directory, 'side'));
+      side.ensure();
+      assert.equal(side.read().transport, example.transport);
+      const epoch = side.read().epoch;
+      secureWrite(path.join(side.directory, 'config.json'), { id: f.record.c2cID, epoch });
+      side.ensure();
+      assert.equal(side.read().transport, example.transport);
+      assert.equal(side.read().epoch, epoch);
+      if (example.transport === 'external') assert.equal(side.connection().stableMCPURL, example.endpoint);
+    } finally { f.clean(); }
+  }
 });

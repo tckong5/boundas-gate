@@ -35,3 +35,15 @@ test('valid refresh authorization counts, wrong-instance or unscoped grants do n
   assert.notEqual(result[2].authorizationState, 'authorized');
   assert.equal(summarizeAIConnections({}, instance, now), null);
 });
+
+
+test('legacy Side authorization metadata stays Gate-scoped without changing Main status rules', () => {
+  const snapshot = { clients: [client('a', 'Legacy'), client('b', 'Wrong Gate'), client('c', 'Wrong Scope')],
+    tokens: [token('a', { scopes: ['workspace.read'] }), token('b', { workspaceId: 'ffffffffffff', scopes: ['workspace.read'] }),
+      token('c', { scopes: ['workspace.read', 'bg.instance.ffffffffffff'] })] };
+  const side = summarizeAIConnections(snapshot, instance, now, { legacySide: true });
+  assert.equal(side[0].authorizationState, 'authorized');
+  assert.notEqual(side[1].authorizationState, 'authorized');
+  assert.notEqual(side[2].authorizationState, 'authorized');
+  assert.notEqual(summarizeAIConnections(snapshot, instance, now)[0].authorizationState, 'authorized');
+});

@@ -9,3 +9,14 @@ test('CLI failure preserves stack and underlying stderr while scrubbing secrets'
   assert.match(text, /missing module/); assert.match(text, /server.mjs:20/);
   for (const value of ['shortsecret', 'BG-B0EA', 'privatekey', 'privateaccess']) assert.ok(!text.includes(value), value);
 });
+
+
+test('login diagnostics distinguish private backend state without logging auth URLs', () => {
+  const error = Object.assign(new Error('Sign in failed'), { errorCode: 'login_timeout', backendState: 'Stopped',
+    loginURL: 'https://login.tailscale.com/a/private' });
+  const output = diagnosticError(error);
+  assert.ok(output.includes('loginFailure=login_timeout backendState=Stopped'));
+  assert.equal(output.includes('/a/private'), false);
+  error.backendState = 'private-value';
+  assert.ok(diagnosticError(error).includes('backendState=unknown'));
+});

@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { Registry, secureWrite } from './registry.mjs';
 import { loadBackend, startGateway } from './server.mjs';
 import { withLock } from '../Tailscale/provider.mjs';
-import { gatewaySetup, transportMode, tunnelAccount } from '../Tailscale/embedded.mjs';
+import { gatewaySetup, transportMode, tunnelAccount, retireSharedRoute } from '../Tailscale/embedded.mjs';
 import { readAIConnections } from './connection-status.mjs';
 import { readRuntime, observeRuntime } from './runtime-instance.mjs';
 import { diagnosticError } from './diagnostics.mjs';
@@ -39,7 +39,35 @@ async function stopGate() {
       while (runtime() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 250));
       if (runtime()) throw new Error('Gate 仍在停止中，請稍後再檢查。');
     }
+    if (registry.read()?.transport === 'embedded') await retireSharedRoute(registry, registry.read().id);
   });
+}
+// Start only the loopback MCP/OAuth host. No provider preflight or account action.
+// Called under the existing Gate lock by both local and full startup paths.
+async function ensureLocalHost() {
+  let current = await observation();
+  if (current.state === 'unknown') throw new Error(current.reason);
+  if (current.state === 'healthy' && current.legacy) {
+    await control(current.runtime, '/control/shutdown');
+    const deadline = Date.now() + 20000;
+    while (runtime() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 250));
+    current = await observation();
+    if (current.state !== 'stopped') throw new Error('舊 Gate 未完成停止，請稍後再試。');
+  }
+  if (current.state === 'stopped') {
+    fs.mkdirSync(registry.directory, { recursive: true, mode: 0o700 });
+    const logFile = path.join(registry.directory, 'gateway.log');
+    const descriptor = fs.openSync(logFile, 'a', 0o600); fs.chmodSync(logFile, 0o600);
+    const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'daemon', backendRoot, `--instance-id=${randomBytes(32).toString('hex')}`], { detached: true, stdio: ['ignore', descriptor, descriptor], env: process.env });
+    child.unref(); fs.closeSync(descriptor);
+    const deadline = Date.now() + 20000;
+    do {
+      await new Promise(resolve => setTimeout(resolve, 250));
+      current = await observation();
+    } while (current.state !== 'healthy' && Date.now() < deadline && child.exitCode === null);
+    if (current.state !== 'healthy') throw new Error('共用連線未能啟動。');
+  }
+  return current;
 }
 async function status() {
   const config = registry.read();
@@ -52,7 +80,7 @@ async function status() {
     desiredRunning: connection.desiredRunning ?? observed.state === 'healthy',
     connectionRemembered: connection.desiredRunning !== null,
     gatewayID: config?.id, roots: registry.active(), configuredMCPURL: config?.configuredMCPURL,
-    transport, transportSetup, aiConnections: readAIConnections(registry.directory, config?.id) };
+    transport, sharedTunnel: transport === 'embedded', transportSetup, aiConnections: readAIConnections(registry.directory, config?.id) };
 }
 try {
   if (action === 'daemon') {
@@ -82,14 +110,39 @@ try {
         registry.setCodePolicy(body.workspaceID, body.required); output(await status());
       } else throw new Error('請先開啟共用連線。');
     });
-  } else if (action === 'remove-client') {
+  } else if (['remove-client', 'revoke-client'].includes(action)) {
     await withLock(registry.directory, async () => {
       const current = await observation();
       if (current.state !== 'healthy' || current.info.clientManagementVersion !== 1) throw new Error('請先重新開啟共用連線，以套用 AI 登記管理功能。');
-      await control(current.runtime, '/control/remove-client', 'POST', 12000, JSON.parse(input));
+      await control(current.runtime, `/control/${action}`, 'POST', 12000, JSON.parse(input));
       output(await status());
     });
   } else if (action === 'status') { output(await status()); }
+  else if (action === 'start-local') {
+    await withLock(registry.directory, async () => {
+      registry.ensure();
+      await ensureLocalHost();
+      registry.updateConnection({ desiredRunning: true, localOnly: true });
+    });
+    output(await status());
+  }
+  else if (action === 'prepare-access') {
+    // Explicit setup intent uses the existing reconnect policy. Closing the UI
+    // during browser approval does not lose the user's request to open the Gate.
+    await withLock(registry.directory, async () => { registry.ensure(); registry.updateConnection({ desiredRunning: true, localOnly: false }); });
+    const setup = await gatewaySetup(registry, { start: true, requestLogin: false });
+    output({ ...await status(), transportSetup: setup });
+  }
+  else if (action === 'cancel-setup') {
+    const current = await observation();
+    if (current.state === 'unknown') throw new Error(current.reason);
+    if (current.state === 'healthy') {
+      if (current.info.setupManagementVersion !== 1) throw new Error('Restart Gate to update setup support.');
+      await control(current.runtime, '/control/cancel-setup', 'POST', 12000, JSON.parse(input));
+    }
+    // A stopped process has no pairing session or pending authorization codes.
+    output(await status());
+  }
   else if (action === 'login') {
     await withLock(registry.directory, async () => registry.ensure());
     const setup = await tunnelAccount(registry, 'login');
@@ -123,38 +176,30 @@ try {
       if (!connection.reconnectEnabled || connection.desiredRunning === false
           || (connection.desiredRunning === null && current.state !== 'healthy')) throw new Error('Gate 已由用戶停止，未有自動開啟。');
     }
-    const setup = await gatewaySetup(registry, { start: true });
+    if (action === 'recover' && registry.connection().localOnly) {
+      await withLock(registry.directory, async () => {
+        const connection = registry.connection();
+        if (!connection.reconnectEnabled || connection.desiredRunning !== true) throw new Error('Gate 已由用戶停止。');
+        await ensureLocalHost();
+      });
+      output(await status());
+      process.exit(0);
+    }
+    // Reconnect must never initiate interactive login or approval.
+    const setup = await gatewaySetup(registry, { start: true, requestLogin: false });
     if (setup.state !== 'ready') throw new Error(setup.message);
     await withLock(registry.directory, async () => {
       let current = await observation();
       if (current.state === 'unknown') throw new Error(current.reason);
-      if (current.state === 'healthy' && current.legacy) {
-        await control(current.runtime, '/control/shutdown');
-        const deadline = Date.now() + 20000;
-        while (runtime() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 250));
-        current = await observation();
-        if (current.state !== 'stopped') throw new Error('舊 Gate 未完成停止，請稍後再試。');
-      }
       const connection = registry.connection();
       if (action === 'recover' && (!connection.reconnectEnabled || connection.desiredRunning === false
           || (connection.desiredRunning === null && current.state !== 'healthy'))) throw new Error('共用連線已由用戶停止，未有自動開啟。');
-      const expected = `https://${setup.hostname}/c2c/${registry.read().id}/mcp`;
+      const expected = connection.stableMCPURL ?? (registry.read().sharedIngress && transportMode(registry) === 'embedded' ? `https://${setup.hostname}/mcp` : `https://${setup.hostname}/c2c/${registry.read().id}/mcp`);
+      if (new URL(expected).hostname !== setup.hostname) throw new Error('Tunnel identity changed; the saved URL is preserved.');
       if (connection.stableMCPURL && connection.stableMCPURL !== expected) throw new Error('Tailscale 地址同原有 ChatGPT 設定唔一致。請連返原有帳戶／裝置；未有更改地址或授權。');
       secureWrite(path.join(registry.directory, 'config.json'), { ...registry.read(), transport: transportMode(registry) });
-      registry.updateConnection({ stableMCPURL: expected, desiredRunning: true });
-      if (current.state === 'stopped') {
-        fs.mkdirSync(registry.directory, { recursive: true, mode: 0o700 });
-        const logFile = path.join(registry.directory, 'gateway.log');
-        const descriptor = fs.openSync(logFile, 'a', 0o600); fs.chmodSync(logFile, 0o600);
-        const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'daemon', backendRoot, `--instance-id=${randomBytes(32).toString('hex')}`], { detached: true, stdio: ['ignore', descriptor, descriptor], env: process.env });
-        child.unref(); fs.closeSync(descriptor);
-        const deadline = Date.now() + 20000;
-        do {
-          await new Promise(resolve => setTimeout(resolve, 250));
-          current = await observation();
-        } while (current.state !== 'healthy' && Date.now() < deadline && child.exitCode === null);
-        if (current.state !== 'healthy') throw new Error('共用連線未能啟動。');
-      }
+      registry.updateConnection({ stableMCPURL: expected, desiredRunning: true, localOnly: false });
+      current = await ensureLocalHost();
       if (current.info?.tunnel?.running !== true || action !== 'start') await control(current.runtime, '/control/tunnel/start');
     });
     output(await status());

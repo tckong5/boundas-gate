@@ -18,14 +18,20 @@ test('first-run login, startup, pairing, reconnect and crash recovery need zero 
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'boundas-zero-launcher-'));
   const registry = new Registry({ directory: path.join(directory, 'main'), allowlistFile: path.join(directory, 'folders.json') });
   const location = embeddedLocation(registry);
-  let publicUrl, running = false, loggedIn = true;
+  let route, publicUrl, running = false, loggedIn = true;
   const accountCalls = [];
+  const routeCalls = [];
   const resources = path.join(directory, 'Resources');
   for (const component of ['Gateway', 'Tailscale']) fs.cpSync(path.resolve('Resources', component), path.join(resources, component), { recursive: true });
   const binary = path.join(resources, 'Runtime/bin/boundas-tunnel');
   fs.mkdirSync(path.dirname(binary), { recursive: true }); fs.symlinkSync('/usr/bin/false', binary);
   fs.mkdirSync(location.controlDirectory, { mode: 0o700 });
-  const ipc = http.createServer((req, res) => {
+  const ipc = http.createServer(async (req, res) => {
+    let body = ''; for await (const chunk of req) body += chunk;
+    const input = body ? JSON.parse(body) : {};
+    if (req.url === '/routes/start') { running = true; publicUrl = input.expectedURL; route = { ...input, publicUrl }; }
+    if (req.url === '/routes/stop') { running = false; publicUrl = undefined; route = undefined; }
+    routeCalls.push(req.url);
     const hostname = 'fixture.example.ts.net';
     const base = `https://${hostname}/c2c/${registry.read()?.id}`;
     if (req.url === '/start') { running = true; publicUrl = base; }
@@ -33,7 +39,7 @@ test('first-run login, startup, pairing, reconnect and crash recovery need zero 
     if (req.url === '/logout') { accountCalls.push('logout'); loggedIn = false; running = false; publicUrl = undefined; }
     if (req.url === '/login') { accountCalls.push('login'); loggedIn = true; }
     res.end(JSON.stringify({ ok: true, service: 'boundas-tsnet', gatewayID: registry.read()?.id,
-      state: loggedIn ? 'ready' : 'login', hostname, running, publicUrl, accountManagementVersion: 1 }));
+      state: loggedIn ? 'ready' : 'login', hostname, running, publicUrl, accountManagementVersion: 1, loginManagementVersion: 2, routeManagementVersion: 1, routes: route ? [route] : [] }));
   });
   await new Promise(resolve => ipc.listen(location.socket, resolve)); fs.chmodSync(location.socket, 0o600);
   const env = { ...process.env, BOUNDAS_GATEWAY_DIR: registry.directory, BOUNDAS_WORKSPACES_FILE: registry.allowlistFile,
@@ -41,6 +47,50 @@ test('first-run login, startup, pairing, reconnect and crash recovery need zero 
   const launch = async action => JSON.parse((await execute(process.execPath,
     [path.join(resources, 'Gateway/launcher.mjs'), action, backendRoot], { env, timeout: 30000 })).stdout);
   try {
+    loggedIn = false;
+    const local = await launch('start-local');
+    assert.equal(local.running, true);
+    assert.equal(local.localOnly, true);
+    assert.equal(local.tunnel.running, false);
+    assert.equal(local.transportSetup.state, 'login');
+    assert.deepEqual(local.roots, []);
+    assert.deepEqual(accountCalls, []);
+    assert.equal(routeCalls.includes('/start'), false);
+    assert.equal(routeCalls.includes('/approve'), false);
+    assert.equal((await fetch(`http://127.0.0.1:${local.port}/health`)).status, 200);
+    assert.equal((await fetch(`http://127.0.0.1:${local.port}/mcp`, { method: 'POST',
+      headers: { 'Content-Type': 'application/json' }, body: '{"jsonrpc":"2.0","id":1,"method":"ping"}' })).status, 401);
+    // Local-only recovery must not silently initiate login, approval or a route.
+    const localRuntimeFile = path.join(registry.directory, 'runtime.json');
+    process.kill(JSON.parse(fs.readFileSync(localRuntimeFile)).pid, 'SIGTERM');
+    const localDeadline = Date.now() + 10000;
+    while (fs.existsSync(localRuntimeFile) && Date.now() < localDeadline) await new Promise(resolve => setTimeout(resolve, 100));
+    assert.equal(fs.existsSync(localRuntimeFile), false);
+    const localRecovered = await launch('recover');
+    assert.equal(localRecovered.running, true);
+    assert.equal(localRecovered.tunnel.running, false);
+    assert.equal(localRecovered.localOnly, true);
+    assert.deepEqual(accountCalls, []);
+    assert.equal(routeCalls.includes('/start'), false);
+    assert.equal(routeCalls.includes('/approve'), false);
+    const localClosed = await launch('stop');
+    assert.equal(localClosed.running, false);
+    assert.equal(localClosed.desiredRunning, false);
+    await assert.rejects(launch('recover'));
+    assert.deepEqual(accountCalls, []);
+    const preparing = await launch('prepare-access');
+    assert.equal(preparing.transportSetup.state, 'login');
+    assert.equal(preparing.desiredRunning, true);
+    assert.equal(preparing.localOnly, false);
+    assert.deepEqual(preparing.roots, []);
+    assert.deepEqual(accountCalls, []); // Set Up prepares; it does not silently sign in.
+    assert.equal((await launch('status')).transportSetup.state, 'login'); // Fresh UI process resumes provider state.
+    await assert.rejects(launch('recover'));
+    await assert.rejects(launch('reconnect'));
+    assert.deepEqual(accountCalls, []); // Neither background recovery nor Repair initiates login.
+    assert.equal(routeCalls.includes('/approve'), false);
+    loggedIn = true; // Simulate the browser completing authorization while the UI was closed.
+    assert.equal((await launch('recover')).running, true); // Existing desired-running policy resumes automatically.
     const login = await launch('login');
     assert.equal(login.transportSetup.state, 'ready'); assert.deepEqual(login.roots, []);
     const id = registry.read().id;

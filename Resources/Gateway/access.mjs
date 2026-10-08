@@ -45,6 +45,10 @@ export class FolderAccess {
     for (const [key, value] of this.keys) if (value.rootID === id) this.keys.delete(key);
   }
   revokeAll() { this.codes.clear(); this.keys.clear(); this.attempts.clear(); }
+  revokePrincipals(hashes) {
+    const principals = new Set(hashes);
+    for (const [id, grant] of this.keys) if (principals.has(grant.principal)) this.keys.delete(id);
+  }
   unlock(code, scopes, extra) {
     this.cleanup();
     const context = this.context(extra);

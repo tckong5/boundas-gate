@@ -34,8 +34,11 @@ cp Resources/Tailscale/*.mjs "$app/Contents/Resources/Tailscale/"
 /usr/libexec/PlistBuddy -c 'Add :BoundasGateDataProfile string new-user-test' "$app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $test_build" "$app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Add :BoundasGateBuildDate string $(date -u +%Y-%m-%dT%H:%M:%SZ)" "$app/Contents/Info.plist"
+python3 "$project_dir/scripts/configure-updater.py" "$app/Contents/Info.plist" --test
+/bin/zsh "$project_dir/scripts/embed-sparkle.sh" "$app"
 xattr -cr "$app"
 codesign --force --sign - "$app/Contents/Resources/Runtime/bin/boundas-tunnel"
+/bin/zsh "$project_dir/scripts/sign-sparkle.sh" "$app" --force --sign -
 codesign --force --sign - "$app"
 codesign --verify --deep --strict "$app"
 if [[ -d "$destination" ]]; then mv "$destination" "$staging_dir/Previous Test.app"; fi

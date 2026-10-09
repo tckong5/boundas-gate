@@ -5,6 +5,7 @@ import SwiftUI
 struct C2CManagerApp: App {
     @NSApplicationDelegateAdaptor(ManagerAppDelegate.self) private var appDelegate
     @StateObject private var session = ManagerSession()
+    @StateObject private var updates = AppUpdater()
     @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
@@ -23,8 +24,17 @@ struct C2CManagerApp: App {
             }
         }
         .defaultSize(width: 900, height: 590)
+        .commands {
+            CommandGroup(after: .appInfo) { CheckForUpdatesButton(updates: updates) }
+        }
 
         MenuBarExtra {
+            Button("About Boundas Gate…") {
+                NSApp.orderFrontStandardAboutPanel(nil)
+                NSApp.activate(ignoringOtherApps: true)
+            }
+            CheckForUpdatesButton(updates: updates)
+            Divider()
             if let store = session.store { MenuBarContent(store: store) }
             else {
                 Text("Boundas Gate needs attention")

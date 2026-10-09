@@ -112,10 +112,13 @@ cat > "$app_dir/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
+python3 "$project_dir/scripts/configure-updater.py" "$app_dir/Contents/Info.plist"
+/bin/zsh "$project_dir/scripts/embed-sparkle.sh" "$app_dir"
 chmod -R u+w "$app_dir"
 xattr -cr "$app_dir"
-# Sign every Mach-O nested in the bundle before signing the outer app.
+# Sparkle has its own explicit signing recipe; do not strip its entitlements.
 while IFS= read -r -d '' candidate; do
+  [[ "$candidate" == "$app_dir/Contents/Frameworks/Sparkle.framework/"* ]] && continue
   if /usr/bin/file -b "$candidate" | /usr/bin/grep -q 'Mach-O'; then
     typeset -a candidate_codesign_args
     candidate_codesign_args=("${codesign_args[@]}")
@@ -125,6 +128,7 @@ while IFS= read -r -d '' candidate; do
     codesign "${candidate_codesign_args[@]}" "$candidate"
   fi
 done < <(find "$app_dir/Contents" -type f -print0)
+/bin/zsh "$project_dir/scripts/sign-sparkle.sh" "$app_dir" "${codesign_args[@]}"
 codesign "${codesign_args[@]}" "$app_dir"
 xattr -cr "$app_dir"
 codesign --verify --deep --strict --verbose=2 "$app_dir"

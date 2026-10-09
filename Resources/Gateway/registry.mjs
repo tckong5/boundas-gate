@@ -1,10 +1,10 @@
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { productDirectory, defaultProductPath } from '../Tailscale/profile-paths.mjs';
 
-export const gatewayDirectory = process.env.BOUNDAS_GATEWAY_DIR ?? path.join(os.homedir(), 'Library/Application Support/C2C Workspace Manager/gateway');
-export const workspaceFile = process.env.BOUNDAS_WORKSPACES_FILE ?? path.join(os.homedir(), 'Library/Application Support/C2C Workspace Manager/workspaces.json');
+export const gatewayDirectory = process.env.BOUNDAS_GATEWAY_DIR ?? path.join(productDirectory, 'gateway');
+export const workspaceFile = process.env.BOUNDAS_WORKSPACES_FILE ?? path.join(productDirectory, 'workspaces.json');
 export function secureWrite(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const temporary = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
@@ -12,7 +12,7 @@ export function secureWrite(file, value) {
   fs.renameSync(temporary, file);
 }
 export class Registry {
-  constructor({ directory = gatewayDirectory, allowlistFile = workspaceFile } = {}) { this.directory = directory; this.allowlistFile = allowlistFile; }
+  constructor({ directory = process.env.BOUNDAS_GATEWAY_DIR ?? defaultProductPath('gateway'), allowlistFile = workspaceFile } = {}) { this.directory = directory; this.allowlistFile = allowlistFile; }
   ensure() {
     const existing = this.read();
     if (existing) return existing;

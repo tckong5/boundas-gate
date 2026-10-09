@@ -4,23 +4,48 @@ import SwiftUI
 @main
 struct C2CManagerApp: App {
     @NSApplicationDelegateAdaptor(ManagerAppDelegate.self) private var appDelegate
-    @StateObject private var store = WorkspaceStore()
+    @StateObject private var session = ManagerSession()
 
     var body: some Scene {
         Window(AppDataPaths.current.windowTitle, id: "manager") {
-            ManagerWindow(store: store, appDelegate: appDelegate)
-                .frame(minWidth: 760, minHeight: 500)
+            if let store = session.store {
+                ManagerWindow(store: store, appDelegate: appDelegate)
+                    .frame(minWidth: 760, minHeight: 500)
+            } else {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("Unable to Open Boundas Gate").font(.title2.bold())
+                    Text(session.error ?? "Your existing data has been preserved.")
+                    Button("Quit Boundas Gate") { NSApp.terminate(nil) }
+                }.padding(32).frame(width: 520)
+            }
         }
         .defaultSize(width: 900, height: 590)
 
         MenuBarExtra {
-            MenuBarContent(store: store)
+            if let store = session.store { MenuBarContent(store: store) }
+            else { Text("Boundas Gate needs attention") }
         } label: {
             Image(nsImage: MenuBarIcon.image)
                 .renderingMode(.original)
                 .accessibilityLabel("Boundas Gate")
         }
         .menuBarExtraStyle(.menu)
+    }
+}
+
+@MainActor
+private final class ManagerSession: ObservableObject {
+    let store: WorkspaceStore?
+    let error: String?
+    init() {
+        do {
+            try AppDataPaths.current.prepare()
+            store = WorkspaceStore()
+            error = nil
+        } catch {
+            store = nil
+            self.error = error.localizedDescription
+        }
     }
 }
 

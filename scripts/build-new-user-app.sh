@@ -2,6 +2,8 @@
 set -euo pipefail
 project_dir="${0:A:h:h}"
 cd "$project_dir"
+mkdir -p "$project_dir/.build/apps"
+destination="$project_dir/.build/apps/Boundas Gate New User Test.app"
 export CLANG_MODULE_CACHE_PATH="$project_dir/.build/clang-module-cache"
 swift build -c debug --product C2CManager --disable-sandbox --build-system native \
   --cache-path "$project_dir/.build/cache" --config-path "$project_dir/.build/config" --manifest-cache local
@@ -10,7 +12,7 @@ GOPATH="$project_dir/.build/go-path" GOCACHE="$project_dir/.build/go-cache" \
 
 # Reuse the verified portable runtime; never copy user settings into the bundle.
 version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' 'dist/Boundas Gate.app/Contents/Info.plist')"
-previous_test_build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' 'dist/Boundas Gate New User Test.app/Contents/Info.plist' 2>/dev/null || echo 0)"
+previous_test_build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$destination/Contents/Info.plist" 2>/dev/null || echo 0)"
 [[ "$previous_test_build" == <-> ]] || previous_test_build=0
 test_build=$((previous_test_build + 1))
 archive="$project_dir/dist/Boundas-Gate-${version}-arm64.zip"
@@ -35,7 +37,6 @@ xattr -cr "$app"
 codesign --force --sign - "$app/Contents/Resources/Runtime/bin/boundas-tunnel"
 codesign --force --sign - "$app"
 codesign --verify --deep --strict "$app"
-destination="$project_dir/dist/Boundas Gate New User Test.app"
 if [[ -d "$destination" ]]; then mv "$destination" "$staging_dir/Previous Test.app"; fi
 ditto --norsrc --noextattr "$app" "$destination"
 xattr -cr "$destination"

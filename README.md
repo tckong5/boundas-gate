@@ -52,7 +52,7 @@ ChatGPT Plugins 新增連線、Developer mode 同測試步驟按 [OpenAI 官方�
 
 設定記錄係用戶確認嘅資料。App 無法直接讀取或修改 ChatGPT connector；公開連線檢查亦唔代表完整 OAuth 配對或 ChatGPT tool call 成功。手動另開 cloudflared 唔會同步 Bridge 嘅公開 URL，應由 Manager 重建連線。
 
-1.2.0 發佈包內置 Node.js、已驗證嘅 C2C backend、cloudflared 同 Tailscale userspace 核心。新安裝嘅共用模式毋須另外安裝 Node.js／C2C／Tailscale App；首次仍需要登入自己嘅 Tailscale 帳戶並允許 HTTPS／Funnel。開發模式喺冇 Runtime bundle 時先沿用 `~/codex-with-chatgpt/bin/c2c.js` 同本機 Node.js。設定儲存在 `~/Library/Application Support/C2C Workspace Manager/workspaces.json`；bridge 狀態、PID 同 logs 由 C2C 儲存在 `~/Library/Application Support/codex-with-chatgpt`。App 不會自動加入任何 folder；共用模式只會自動恢復用戶之前已開啟嘅連線。
+1.2.0 發佈包內置 Node.js、已驗證嘅 C2C backend、cloudflared 同 Tailscale userspace 核心。新安裝嘅共用模式毋須另外安裝 Node.js／C2C／Tailscale App；首次仍需要登入自己嘅 Tailscale 帳戶並允許 HTTPS／Funnel。開發模式喺冇 Runtime bundle 時先沿用 `~/codex-with-chatgpt/bin/c2c.js` 同本機 Node.js。設定儲存在 `~/Library/Application Support/Boundas Gate/workspaces.json`；bridge 狀態、PID 同 logs 由 C2C 儲存在 `~/Library/Application Support/codex-with-chatgpt`。App 不會自動加入任何 folder；共用模式只會自動恢復用戶之前已開啟嘅連線。
 
 ## Build
 
@@ -158,3 +158,7 @@ BOUNDAS_C2C_ROOT="$HOME/codex-with-chatgpt" node --test Tests/Gateway/gateway.te
 ### 1.2.0 安裝包驗收
 
 40 項 App、40 項 Gateway／連線及 7 項 Go race tests 通過。空白設定已驗證內置核心登入連結及重試保留身份。現有共用 Gateway 改用 bundle Node／backend 並重啟後，原有 既有 MCP Plugin 仍可列出多個 Folder 同讀取檔案，固定 URL／OAuth 保留，冇重新 pairing。內置完整 Funnel 同 VPN 並用仍待登入實測。修改檔案及範圍見 [1.2.0 更新紀錄](RELEASE_NOTES.md)。
+
+### Product state / build artifact migration
+
+Production 資料改用 `~/Library/Application Support/Boundas Gate`；App 會先安全遷移舊資料，保留舊資料夾作備份，失敗時停止啟動。New User Test 輸出改到 `.build/apps/Boundas Gate New User Test.app`，資料 profile 保持獨立。詳見 [branding/state migration](docs/branding-state-migration.md)。

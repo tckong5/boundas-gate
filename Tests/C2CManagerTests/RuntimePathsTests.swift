@@ -36,8 +36,8 @@ final class RuntimePathsTests: XCTestCase {
         XCTAssertEqual(child["BOUNDAS_STATE_DIR"], trial.directory.appendingPathComponent("tailscale").path)
         XCTAssertEqual(child["C2C_STATE_DIR"], trial.c2c.path)
         XCTAssertEqual(child["PATH"], inherited["PATH"])
-        XCTAssertEqual(production.childEnvironment(inherited), inherited)
-        XCTAssertEqual(production.workspaces.path, support.appendingPathComponent("C2C Workspace Manager/workspaces.json").path)
+        XCTAssertEqual(production.childEnvironment(["PATH": "/usr/bin"])["BOUNDAS_GATEWAY_DIR"], production.gateway.path)
+        XCTAssertEqual(production.workspaces.path, support.appendingPathComponent("Boundas Gate/workspaces.json").path)
         XCTAssertEqual(production.c2c.path, support.appendingPathComponent("codex-with-chatgpt").path)
     }
 

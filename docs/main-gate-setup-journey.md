@@ -18,7 +18,7 @@ Waiting for a user action uses a grey breathing dot; processing/checking uses bl
 
 Main Gate stores one unfinished setup draft in its app data profile:
 
-- Normal profile: `~/Library/Application Support/C2C Workspace Manager/ai-setup.json`
+- Normal profile: `~/Library/Application Support/Boundas Gate/ai-setup.json`
 - New-user test profile: `~/Library/Application Support/Boundas Gate New User Test/ai-setup.json`
 
 The file is written atomically with permission `0600`. It contains app choice, stage, Gate identity, attempt identity, non-secret pairing session IDs, associated client ID and timestamps. It contains no pairing code, access/refresh token or client secret. Add Another App creates a fresh attempt after completion/cancellation; an unfinished attempt must first be continued or cancelled.

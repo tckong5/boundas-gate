@@ -5,8 +5,9 @@ import http from 'node:http';
 import { randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { withOwnerLock as withLock } from './owner-lock.mjs';
+import { productDirectory, defaultProductPath } from './profile-paths.mjs';
 
-export const stateDirectory = process.env.BOUNDAS_STATE_DIR ?? path.join(os.homedir(), 'Library/Application Support/C2C Workspace Manager/tailscale');
+export const stateDirectory = process.env.BOUNDAS_STATE_DIR ?? path.join(productDirectory, 'tailscale');
 export function findBinary() {
   return [path.join(os.homedir(), 'Applications/Tailscale.app/Contents/MacOS/Tailscale'), '/Applications/Tailscale.app/Contents/MacOS/Tailscale', '/Applications/Tailscale.app/Contents/MacOS/tailscale', '/opt/homebrew/bin/tailscale', '/usr/local/bin/tailscale'].find(file => {
     try { fs.accessSync(file, fs.constants.X_OK); return true; } catch { return false; }
@@ -65,7 +66,7 @@ function writeLedger(directory, ledger) {
   fs.writeFileSync(temporary, JSON.stringify(ledger), { mode: 0o600 });
   fs.renameSync(temporary, file);
 }
-export async function retireRoutes(id, { directory = stateDirectory, binary = findBinary(), run = command } = {}) {
+export async function retireRoutes(id, { directory = process.env.BOUNDAS_STATE_DIR ?? defaultProductPath('tailscale'), binary = findBinary(), run = command } = {}) {
   mounts(id); // Validate the Gate identity before inspecting its routes.
   await withLock(directory, async () => {
     const ledger = readLedger(directory);
@@ -104,7 +105,7 @@ export function assertOwnedConfig(config, key, ledger) {
     }
   }
 }
-export async function setupCheck(binary = findBinary(), run = command, directory = stateDirectory) {
+export async function setupCheck(binary = findBinary(), run = command, directory = process.env.BOUNDAS_STATE_DIR ?? defaultProductPath('tailscale')) {
   const setup = await preflight(binary, run);
   if (setup.state !== 'ready') return setup;
   try {
@@ -146,7 +147,7 @@ export function createGuardProxy(port, secret) {
 
 export class TailscaleProvider {
   name = 'tailscale-funnel';
-  constructor(id, { binary = findBinary(), run = command, directory = stateDirectory, expectedURL = null } = {}) {
+  constructor(id, { binary = findBinary(), run = command, directory = process.env.BOUNDAS_STATE_DIR ?? defaultProductPath('tailscale'), expectedURL = null } = {}) {
     this.id = id; this.binary = binary; this.run = run; this.directory = directory;
     this.expectedURL = expectedURL;
     this.url = null; this.running = false; this.proxy = null; this.routes = []; this.timer = null; this.pending = Promise.resolve();

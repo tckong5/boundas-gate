@@ -147,6 +147,6 @@ Swift：55 tests PASS；Gateway／Tunnel Node：52 tests PASS。最後 Side life
 ## 可開啟 build
 
 - `dist/Boundas Gate Debug.app`
-- `dist/Boundas Gate New User Test.app`
+- `.build/apps/Boundas Gate New User Test.app`
 
 更新兩個既有 Debug / isolated test bundles，冇重置 Folder／OAuth 資料。一般 release bundle 仍維持原版。今次冇 commit，冇做 ngrok。

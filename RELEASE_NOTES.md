@@ -1,61 +1,82 @@
-# Boundas Gate 1.2.0（build 6）
+# Boundas Gate 1.2.0（production build 7）
 
-2026-10-06，本機 Apple Silicon 試用版。
+目前係 release candidate。產品版本維持 1.2.0；production build number 由 6 提升至 7。
 
-## 今次完成
+## 今輪完成
 
-- App 內置 Node.js 24.19.0、已驗證 C2C 0.1.3 build、完整 production dependencies 及 cloudflared 2026.9.1，保留原始授權文件。
-- 新安裝共用模式預設內置 Tailscale tsnet 1.104.0，使用 userspace networking、持久裝置身份同私人控制端點；App 提供登入／HTTPS／Funnel 授權連結。
-- 舊固定地址保持 external transport，保留 URL、gateway ID、OAuth 同分享清單；唔會自動換成新裝置身份。
-- 修正慢啟動時未產生登入連結，重試登入沿用同一個核心程序及身份。
-- 產生 `.app`、ZIP、DMG 同 SHA256SUMS，附安裝說明。
+- Main Gate / Side Gate 使用一致嘅 Gate、Folder、Tunnel 同 MCP Connection model。
+- Fresh/current Shared Secure Access 讓 Main Gate 同 Side Gate 共用 Tailscale identity，但 route、lifecycle、authorization boundary 彼此獨立；existing legacy fixed-address／external transport 會保留到明確 migration。
+- Secure Access、Connect an AI App 同 Ready to Use 統一成 current setup journey。
+- Live Gate Activity Map 顯示 Gate、AI app、Folder topology 同 request activity。
+- Side Gate runtime state 由單一 owner 管理，避免重複 start、refresh、reconnect 或 stale state。
+- Boundas Gate branding 已完成；bundle identifier 改為 `com.boundasgate.app`。Production state migration implementation 同 fixture verification 已完成，真實 production migration 仍待 final acceptance；Gate identity 仍由既有 Gate state 提供。
+- Workspace state fail closed：corrupt config、invalid Folder identity、duplicate Folder identity、duplicate canonical path 或 c2cID collision 都會停止啟動，唔會當成空白 Folder list。
+- Raw Debug 預設使用 `Boundas Gate Debug` profile；New User Test 使用獨立 profile，唔會讀取 production state。
+- Root `LICENSE` 加入 Boundas Gate MIT License；Runtime 內第三方 license 保持分開。
+- Local/test build 同 public Developer ID / notarization path 分開；public mode 缺少 credentials 時會直接 fail，唔會退回 ad hoc signing。
+- Node/V8 hardened-runtime entitlement 已經以實測收窄至 `com.apple.security.cs.allow-jit`；冇加入 broad executable-memory 或其他額外 entitlement。
 
-## 驗收
+## Release identity
+
+| 項目 | 值 |
+| --- | --- |
+| Product | Boundas Gate |
+| Bundle identifier | `com.boundasgate.app` |
+| New User Test bundle identifier | `com.boundasgate.app.new-user-test` |
+| Version | `1.2.0` |
+| Production build | `7` |
+| License | MIT（只適用於 Boundas Gate 自己嘅程式碼） |
+
+## 驗收狀態
 
 | 項目 | 結果 |
 | --- | --- |
-| Swift App tests | PASS，40 項 |
-| Gateway／連線 tests，使用 bundle Node + backend | PASS，40 項 |
-| Go 公開路由／身份／並發 tests，race detector | PASS，7 項 |
-| 空白 HOME、無 system Node／C2C：CLI、核心、登入連結 | PASS |
-| 重試登入保留內置核心及身份 | PASS |
-| 安裝 archive 解壓後簽署驗證 | PASS，ad hoc |
-| 現有共用 Gateway 改用 bundle runtime，Stop／Start | PASS，URL／gateway ID／多個 roots 不變 |
-| 原有 既有 MCP Plugin 列出多個 Folder、讀取 manager folder | PASS，冇重新 OAuth／pairing |
+| Swift suite | PASS，128 tests |
+| Gateway／Tailscale Node suite | PASS，101 tests |
+| Go tunnel tests | PASS，`go test -race ./...` |
+| Local/test ad hoc signing path | PASS；bundle / ZIP extracted app `codesign --verify --deep --strict` 通過 |
+| Developer ID signing path | 已實作；需要 `BOUNDAS_CODESIGN_IDENTITY` |
+| Notarization / stapling / Gatekeeper | 未執行；需要 `BOUNDAS_NOTARY_PROFILE` 及 Developer ID credentials |
+| Portable release smoke test | PASS；isolated bundle、embedded userspace core、login URL、retry identity 全部通過 |
 
-內置核心測試使用暫存設定，測試後移除；冇登入 Tailscale 帳戶或開公開 Funnel。Live upgrade 使用用戶原本 external transport，保留所有授權。
+未有喺今輪執行真實 production migration，亦未接觸真實 Folder、OAuth token 或 Tailscale account。
 
-## 修改檔案
+## Public release path
 
-### App
+本地測試可以使用 ad hoc signing：
 
-- `Sources/C2CManager/RuntimePaths.swift`（新增）
-- `Sources/C2CManager/C2CClient.swift`
-- `Sources/C2CManager/SharedGatewayStore.swift`
-- `Sources/C2CManager/SharedGatewayView.swift`
+```sh
+./scripts/build-app.sh
+./scripts/package-release.sh
+```
 
-### Gateway／連線
+正式 public path 必須提供：
 
-- `Resources/Gateway/launcher.mjs`
-- `Resources/Gateway/server.mjs`
-- `Resources/Tailscale/embedded.mjs`（新增）
-- `Native/Tunnel/go.mod`、`go.sum`、`main.go`、`main_test.go`（新增）
+```sh
+BOUNDAS_BUILD_MODE=public
+BOUNDAS_CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
+BOUNDAS_NOTARY_PROFILE="boundas-release"
+```
 
-### 打包／測試／文件
+`BOUNDAS_NOTARY_PROFILE` 係 `xcrun notarytool` Keychain profile 名稱。Public path 會簽 nested Mach-O、使用 hardened runtime 同 timestamp、submit／wait notarization、staple、再做 `codesign` 同 `spctl` verification。任何 credential 缺失都會停止，唔會報告 release ready。
 
-- `scripts/build-app.sh`
-- `scripts/bundle-runtime.mjs`、`collect-go-licenses.mjs`、`package-release.sh`（新增）
-- `Tests/C2CManagerTests/RuntimePathsTests.swift`（新增）
-- `Tests/Tailscale/embedded.test.mjs`（新增）
-- `Tests/Release/portable.mjs`（新增，可重跑空白設定 smoke test）
-- `README.md`、`ROADMAP.md`
-- `INSTALL.md`、`RELEASE_NOTES.md`（新增）
+## dist 內容
 
-## 下一階段
+正式 package 完成後，`dist/` 只應包含：
 
-- 本人登入內置模式後，完成 Funnel → ChatGPT OAuth → MCP、VPN 並用同另一部 Mac 驗收。
-- 舊 external 裝置轉入內置裝置嘅明確遷移流程；目前舊用戶仍需要原本 Tailscale App。
-- 固定 GitHub repo／Releases，加入 App 更新通知及簽署更新。
-- Developer ID 簽署／公證。本試用包只有 ad hoc 簽署，首次啟動可能需要 macOS 私隱與保安確認。
+```text
+Boundas Gate.app
+Boundas-Gate-1.2.0-arm64.zip
+Boundas-Gate-1.2.0-arm64.dmg
+SHA256SUMS.txt
+```
 
-本版未提供自動更新，亦未聲稱已解決所有 VPN 並用情況。普通升級保留設定及有效 OAuth；內置新裝置唔保證沿用舊裝置 URL。
+New User Test 會留喺：
+
+```text
+.build/apps/Boundas Gate New User Test.app
+```
+
+## 下一步
+
+如有 Developer ID certificate 及 notarytool profile，先可以做真正 public release acceptance；完成 acceptance 後先執行真實 production migration。今輪唔會自行做 production data migration。

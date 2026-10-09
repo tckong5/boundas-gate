@@ -7,7 +7,8 @@
 - New User Test: `~/Library/Application Support/Boundas Gate New User Test`.
 - The C2C dependency retains its production state in `~/Library/Application Support/codex-with-chatgpt`. Moving this separate backend store would risk existing Side Gate credentials/preferences and other C2C consumers. The test profile uses its own `c2c/` subdirectory.
 - Package/target/executable names `C2CWorkspaceManager` and `C2CManager`, and bundled `Runtime/C2C`, are intentionally internal.
-- Production bundle identifier remains `local.c2c.WorkspaceManager`; test identifier remains `local.c2c.WorkspaceManager.new-user-test`.
+- Production bundle identifier is `com.boundasgate.app`; test identifier is `com.boundasgate.app.new-user-test`.
+- Gate identity, OAuth, Tailscale identity and Application Support state continue to come from existing Gate state and profile paths, not from the macOS bundle identifier.
 
 ## Safe one-time migration
 

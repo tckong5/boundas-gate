@@ -1,33 +1,51 @@
-# Boundas Gate 1.2.0 試用版
+# Boundas Gate 1.2.0
 
-支援 Apple Silicon（M1／M2／M3／M4 等）Mac，macOS 14 或以上。
+支援 Apple Silicon Mac，macOS 14 或以上。
 
 ## 安裝
 
-1. 開啟 DMG，將 Boundas Gate 拖入 Applications；ZIP 版本先解壓縮再移入 Applications。
-2. 開啟 Boundas Gate，按 Add Folders… 加入你想分享嘅資料夾。
-3. 喺「共用 ChatGPT 連線」勾選資料夾，按「儲存變更」。
-4. 按「登入內置連線」，用你自己嘅 Tailscale 帳戶登入。需要 HTTPS／Funnel 權限時，按 App 提供嘅授權連結。
-5. 開啟共用連線，複製 MCP URL，喺 ChatGPT 新增 OAuth 連線並輸入 App 產生嘅配對碼。
+1. 喺 DMG 將 **Boundas Gate.app** 拖入 Applications；ZIP 版本先解壓縮，再將 app 移入 Applications。
+2. 開啟 Boundas Gate，按 **Add Folder** 加入要分享嘅資料夾。
+3. 揀 **Main Gate** 或建立 **Side Gate**，按 **Open Gate** 啟動本機 Gate。
+4. 喺 **Secure Access** 按 **Sign In**／**Set Up**，完成 Tailscale secure access。Fresh/current Shared Secure Access 只需一次 Tailscale login；新增 Folder 或 Side Gate 唔需要重複登入。Existing legacy fixed-address／external transport 會保留到明確 migration，唔會靜默改 endpoint 或 device identity。
+5. 喺 **Connect an AI App** 揀 ChatGPT、Claude 或其他 MCP-compatible app，跟住畫面指示完成 MCP Connection。
+6. 見到 **Ready to Use** 即代表呢個 Gate 已完成 setup。
 
-Node.js、C2C backend、Tailscale 連線核心已內置；共用模式唔需要 Homebrew、Terminal 或另外安裝 Tailscale App。
+ChatGPT setup 會引導你：
 
-本試用包使用本機 ad hoc 簽署，未經 Apple Developer ID 簽署／公證。首次開啟可能需要按 macOS「私隱與保安」頁面嘅「仍要打開」確認。
+1. Open Plugins
+2. Click Add +
+3. Choose Create MCP App
 
-## 已有 Boundas Gate
+之後喺 ChatGPT 貼入 Boundas Gate 顯示嘅 Name、Description 同 Server URL，按要求完成 authorization。Claude 或其他 MCP app 使用各自獨立嘅 MCP Connection。
 
-先退出舊 App，再換入新版。資料夾、分享清單、OAuth 授權同固定地址保存喺 Application Support，唔會隨 App 替換而清除。
+## Main Gate 同 Side Gate
 
-已有固定地址嘅連線繼續使用原本 Tailscale App／裝置，避免 URL 改變。1.2.0 唔會自動將舊連線切換成新嘅內置裝置身份。新安裝使用內置連線。
+Main Gate 可以分享 0 個或多個 Folder。Side Gate 係獨立嘅 Gate，加入 Folder、Open／Close、Secure Access 同 MCP authorization 都獨立管理。同一 Folder 可以同時出現喺 Main Gate 同 Side Gate；Remove Side Gate 唔會刪除 Folder 或改 Main Gate。
 
-配對一次後，新增 Folder 並確認分享即可；取消分享即時撤銷該 Folder 存取。選用 Folder 通行碼仍需逐個解鎖。
+## 升級現有 Boundas Gate
 
-## 驗證範圍
+先退出舊 app，再以新版本取代 Applications 入面嘅 app。Folder、Gate state、OAuth authorization、Tailscale state 同 endpoint metadata 會留喺：
 
-已驗證內置 runtime 喺空白 HOME／冇 system Node 路徑嘅隔離環境運作、內置核心啟動及登入流程；本機 OAuth／MCP、動態授權、路徑限制、公開路由同舊 URL 保護有自動測試。
+```text
+~/Library/Application Support/Boundas Gate
+```
 
-完整內置 Funnel 連線需要本人登入後實測；唔等同已喺另一部實體 Mac、VPN 切換或全新 ChatGPT 帳戶完成驗收。自動更新及正式公開發佈仍係下一階段。
+Bundle identifier 只係 macOS app identity，唔係 Gate identity；升級唔會因為 bundle ID 改變而另開一個 Gate。首次正式 production 啟動會按現有 migration 規則安全處理舊資料；Debug 同 New User Test 使用獨立 profile，唔會遷移 production state。
+Bundle identifier 只係 macOS app identity，唔係 Gate identity；升級唔會因為 bundle ID 改變而另開一個 Gate。首次正式 production 啟動會按現有 migration 規則安全處理舊資料；Debug 同 New User Test 使用獨立 profile，唔會遷移 production state。Existing legacy fixed-address／external transport 會維持原有 endpoint 同 device identity，直到 user 明確執行 migration。
 
-## 更新
+## Runtime 同安全
 
-目前版本未有 App 內自動更新。替換 App 後，原有分享設定同有效 OAuth 授權可繼續使用。
+Node.js、C2C backend、cloudflared 同 Tailscale userspace runtime 已經隨 app 包含，普通用戶唔需要另外安裝 Homebrew、Node、C2C 或 Tailscale App。Runtime 內嘅第三方元件保留各自 license；根目錄 LICENSE 只適用於 Boundas Gate 自己嘅程式碼。
+
+Folder Passcode Protection 係額外 Folder-level policy。開啟後，經 Main Gate 或 Side Gate 存取該 Folder 都需要遵守同一 policy；Temporary Access、expiry 同 revoke 狀態會喺 Passcode popover 顯示。
+
+## 本版本驗收狀態
+
+本機／測試 build 使用 ad hoc signing，未等同 Developer ID public release。正式 release path 需要：
+
+- `BOUNDAS_CODESIGN_IDENTITY`
+- `BOUNDAS_NOTARY_PROFILE`（`xcrun notarytool` Keychain profile）
+- Developer ID Application certificate、hardened runtime、notarization、stapling 同 Gatekeeper verification
+
+如未提供 credentials，public mode 會直接停止，唔會產生看似已準備好嘅 public artifact。正式 release status 見 [RELEASE_NOTES.md](RELEASE_NOTES.md)。

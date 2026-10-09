@@ -8,6 +8,7 @@ final class LifecycleClient: SideGateClient, GatewayClient {
     var localOnly: Set<UUID> = []
     var pairs: [UUID: GatewayPairing] = [:]
     var authorizedClients: [UUID: String] = [:]
+    var endpointURLs: [UUID: String] = [:]
     var failRemoval = false
     var removalObserved: ((WorkspaceRecord) -> Void)?
     var heldStatusID: UUID?
@@ -45,9 +46,10 @@ final class LifecycleClient: SideGateClient, GatewayClient {
             "authorizationState": "authorized", "authorizationExpiresAt": Date().addingTimeInterval(3600).timeIntervalSince1970 * 1000]] } ?? []
         return try JSONSerialization.data(withJSONObject: ["ok": true, "running": open, "state": open ? "healthy" : "stopped",
             "gatewayID": String(id.uuidString.replacingOccurrences(of: "-", with: "").prefix(12)).lowercased(),
-            "port": 56148, "pid": 1, "roots": [], "tokenCount": client.count,
+            "port": 56148, "pid": 1, "publicUrl": endpointURLs[id].map { $0 as Any } ?? (NSNull() as Any),
+            "roots": [], "tokenCount": client.count,
             "pairingActive": pairs[id] != nil, "desiredRunning": open, "localOnly": localOnly.contains(id),
-            "tunnel": ["running": open && !localOnly.contains(id)], "aiConnections": client])
+            "tunnel": ["running": open && !localOnly.contains(id), "url": endpointURLs[id].map { $0 as Any } ?? (NSNull() as Any)], "aiConnections": client])
     }
     func makeGateway(_ id: UUID, logFile: URL) -> SharedGatewayStore {
         if id != SharedGatewayStore.selectionID { createdSideGateIDs.append(id) }
@@ -90,8 +92,8 @@ final class SideGateLifecycleTests: XCTestCase {
         defer { free(resolved) }
         let folder = URL(fileURLWithPath: String(cString: resolved))
         let client = LifecycleClient()
-        let store = WorkspaceStore(configURL: folder.appendingPathComponent("records.json"), client: client,
-                                   automaticallyRefresh: false, sideGatewayFactory: { client.makeGateway($0.id, logFile: folder.appendingPathComponent("diagnostics.log")) })
+        let store = try WorkspaceStore(configURL: folder.appendingPathComponent("records.json"), client: client,
+                                       automaticallyRefresh: false, sideGatewayFactory: { client.makeGateway($0.id, logFile: folder.appendingPathComponent("diagnostics.log")) })
         return (folder, store, client)
     }
 
@@ -183,7 +185,7 @@ final class SideGateLifecycleTests: XCTestCase {
         XCTAssertEqual(retained.path, original.path)
         XCTAssertEqual(retained.name, original.name)
         XCTAssertTrue(client.calls.isEmpty)
-        let restored = WorkspaceStore(configURL: folder.appendingPathComponent("records.json"), client: client, automaticallyRefresh: false)
+        let restored = try WorkspaceStore(configURL: folder.appendingPathComponent("records.json"), client: client, automaticallyRefresh: false)
         XCTAssertTrue(restored.mainGateWorkspaces.isEmpty)
         XCTAssertEqual(restored.sideGateWorkspaces.map(\.id), [original.id])
     }
@@ -206,7 +208,7 @@ final class SideGateLifecycleTests: XCTestCase {
         store.moveFolders(from: IndexSet(integer: 0), to: 3, side: true)
         XCTAssertEqual(store.sideGateWorkspaces.map(\.id), [original[1].id, original[2].id, original[0].id])
         XCTAssertEqual(store.selectedID, original[1].id)
-        let restored = WorkspaceStore(configURL: folder.appendingPathComponent("records.json"), client: client, automaticallyRefresh: false)
+        let restored = try WorkspaceStore(configURL: folder.appendingPathComponent("records.json"), client: client, automaticallyRefresh: false)
         XCTAssertEqual(restored.mainGateWorkspaces, store.mainGateWorkspaces)
         XCTAssertEqual(restored.sideGateWorkspaces, store.sideGateWorkspaces)
         XCTAssertTrue(client.calls.isEmpty)
@@ -223,7 +225,7 @@ final class SideGateLifecycleTests: XCTestCase {
         }
         let config = folder.appendingPathComponent("records.json")
         try JSONEncoder().encode(records).write(to: config)
-        let store = WorkspaceStore(configURL: config, client: client, automaticallyRefresh: false)
+        let store = try WorkspaceStore(configURL: config, client: client, automaticallyRefresh: false)
         let newFolder = folder.appendingPathComponent("new")
         try FileManager.default.createDirectory(at: newFolder, withIntermediateDirectories: true)
         XCTAssertTrue(store.addPath(newFolder.path))
@@ -242,7 +244,7 @@ final class SideGateLifecycleTests: XCTestCase {
         let config = folder.appendingPathComponent("records.json")
         try JSONEncoder().encode([record]).write(to: config)
         let gateway = SharedGatewayStore(automaticallyRefresh: false)
-        let loaded = WorkspaceStore(configURL: config, client: client, gateway: gateway, automaticallyRefresh: false)
+        let loaded = try WorkspaceStore(configURL: config, client: client, gateway: gateway, automaticallyRefresh: false)
         client.removalObserved = { item in
             XCTAssertEqual(item.sideGateRemovalState, .removing)
             XCTAssertTrue(item.belongsToSideGates)
@@ -264,7 +266,7 @@ final class SideGateLifecycleTests: XCTestCase {
         XCTAssertNil(retained.lastObservedMCPURL); XCTAssertEqual(retained.lastKnownMCPURL, record.configuredMCPURL)
         XCTAssertTrue(loaded.gateway === gateway)
         XCTAssertNil(gateway.status); XCTAssertNil(gateway.operation)
-        let restored = WorkspaceStore(configURL: config, client: client, automaticallyRefresh: false)
+        let restored = try WorkspaceStore(configURL: config, client: client, automaticallyRefresh: false)
         XCTAssertEqual(restored.workspaces, loaded.workspaces)
         loaded.selectedID = nil
         XCTAssertTrue(loaded.addPath(folder.path))
@@ -286,7 +288,7 @@ final class SideGateLifecycleTests: XCTestCase {
         client.calls.removeAll()
         await store.startAll(); await store.refreshAll()
         XCTAssertTrue(client.calls.isEmpty)
-        let restored = WorkspaceStore(configURL: folder.appendingPathComponent("records.json"), client: client, automaticallyRefresh: false)
+        let restored = try WorkspaceStore(configURL: folder.appendingPathComponent("records.json"), client: client, automaticallyRefresh: false)
         XCTAssertEqual(restored.workspaces[0].sideGateRemovalState, .failed)
         client.failRemoval = false
         await restored.removeSideGate(restored.workspaces[0])
@@ -302,7 +304,7 @@ final class SideGateLifecycleTests: XCTestCase {
         record.sideGateAdded = true; record.sideGateRemovalState = .removing
         let config = folder.appendingPathComponent("records.json")
         try JSONEncoder().encode([record]).write(to: config)
-        let restored = WorkspaceStore(configURL: config, client: client, automaticallyRefresh: false)
+        let restored = try WorkspaceStore(configURL: config, client: client, automaticallyRefresh: false)
         XCTAssertEqual(restored.workspaces[0].sideGateRemovalState, .failed)
         XCTAssertFalse(restored.workspaces[0].canOperateSideGate)
     }
@@ -315,7 +317,7 @@ final class SideGateLifecycleTests: XCTestCase {
         record.sideGateAdded = nil; record.connectionProvider = .tailscale
         let config = folder.appendingPathComponent("records.json")
         try JSONEncoder().encode([record]).write(to: config)
-        let restored = WorkspaceStore(configURL: config, client: client, automaticallyRefresh: false)
+        let restored = try WorkspaceStore(configURL: config, client: client, automaticallyRefresh: false)
         XCTAssertFalse(restored.workspaces[0].belongsToSideGates)
         XCTAssertEqual(restored.workspaces[0].provider, .tailscale)
     }

@@ -40,7 +40,7 @@ private final class ManagerSession: ObservableObject {
     init() {
         do {
             try AppDataPaths.current.prepare()
-            store = WorkspaceStore()
+            store = try WorkspaceStore()
             error = nil
         } catch {
             store = nil

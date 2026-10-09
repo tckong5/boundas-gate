@@ -182,6 +182,7 @@ final class SharedGatewayStore: ObservableObject {
     private var lastConnectionSummary: String?
     private var reconnectPolicy = GatewayReconnectPolicy()
     private var wakeObserver: AnyCancellable?
+    private var automaticRefreshStarted = false
 
     var connectionState: GatewayConnectionState {
         .make(status: statusConfirmed ? status : nil, diagnostics: diagnostics, checking: visiblyChecking)
@@ -243,6 +244,12 @@ final class SharedGatewayStore: ObservableObject {
         self.diagnosticsLogFile = diagnosticsLogFile
         self.gateSourceID = gateSourceID
         guard automaticallyRefresh && gateSourceID == nil else { return }
+        startAutomaticRefresh()
+    }
+
+    func startAutomaticRefresh() {
+        guard gateSourceID == nil, !automaticRefreshStarted else { return }
+        automaticRefreshStarted = true
         Task { [weak self] in
             while let self {
                 if !self.working {

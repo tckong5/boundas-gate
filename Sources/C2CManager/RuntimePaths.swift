@@ -2,18 +2,41 @@ import Foundation
 import Darwin
 
 struct AppDataPaths {
+    enum Profile: Equatable {
+        case production
+        case newUserTest
+        case debug
+    }
+
     let support: URL
-    let newUserTest: Bool
+    let profile: Profile
     var overrides: [String: String] = [:]
 
+    init(support: URL, newUserTest: Bool, overrides: [String: String] = [:]) {
+        self.init(support: support, profile: newUserTest ? .newUserTest : .production, overrides: overrides)
+    }
+
+    init(support: URL, profile: Profile, overrides: [String: String] = [:]) {
+        self.support = support
+        self.profile = profile
+        self.overrides = overrides
+    }
+
+    var newUserTest: Bool { profile == .newUserTest }
+
     var directory: URL {
-        support.appendingPathComponent(newUserTest ? "Boundas Gate New User Test" : "Boundas Gate")
+        switch profile {
+        case .production: return support.appendingPathComponent("Boundas Gate")
+        case .newUserTest: return support.appendingPathComponent("Boundas Gate New User Test")
+        case .debug: return support.appendingPathComponent("Boundas Gate Debug")
+        }
     }
     var workspaces: URL { overridden("BOUNDAS_WORKSPACES_FILE", default: directory.appendingPathComponent("workspaces.json")) }
     var gateway: URL { overridden("BOUNDAS_GATEWAY_DIR", default: directory.appendingPathComponent("gateway")) }
     var tailscale: URL { overridden("BOUNDAS_STATE_DIR", default: directory.appendingPathComponent("tailscale")) }
     var c2c: URL {
-        overridden("C2C_STATE_DIR", default: newUserTest ? directory.appendingPathComponent("c2c") : support.appendingPathComponent("codex-with-chatgpt"))
+        let fallback = profile == .production ? support.appendingPathComponent("codex-with-chatgpt") : directory.appendingPathComponent("c2c")
+        return overridden("C2C_STATE_DIR", default: fallback)
     }
     var c2cLogs: URL { c2c.appendingPathComponent("logs") }
     var windowTitle: String { newUserTest ? "Boundas Gate · 新用戶測試" : "Boundas Gate" }
@@ -30,22 +53,36 @@ struct AppDataPaths {
     }
 
     private func overridden(_ key: String, default fallback: URL) -> URL {
-        guard !newUserTest, let value = overrides[key] else { return fallback }
+        // Debug uses its own profile regardless of inherited path variables.
+        // Production is the only profile where explicit path overrides are accepted.
+        guard profile == .production, let value = overrides[key] else { return fallback }
         return URL(fileURLWithPath: value)
     }
 
     /// Finish migration before creating any store, refresh task or child process.
     func prepare() throws {
-        guard !newUserTest else { return }
+        guard profile == .production else { return }
         let usesCanonical = overrides["BOUNDAS_WORKSPACES_FILE"] == nil
             || overrides["BOUNDAS_GATEWAY_DIR"] == nil || overrides["BOUNDAS_STATE_DIR"] == nil
         if usesCanonical { try ProductStateMigration.prepare(support: support) }
     }
 
     static var current: AppDataPaths {
-        .init(support: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0],
-              newUserTest: Bundle.main.object(forInfoDictionaryKey: "BoundasGateDataProfile") as? String == "new-user-test",
-              overrides: ProcessInfo.processInfo.environment)
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let environment = ProcessInfo.processInfo.environment
+        let marker = Bundle.main.object(forInfoDictionaryKey: "BoundasGateDataProfile") as? String
+        #if DEBUG
+        let profile = resolveProfile(bundleMarker: marker, environment: environment, debugBuild: true)
+        #else
+        let profile = resolveProfile(bundleMarker: marker, environment: environment, debugBuild: false)
+        #endif
+        return .init(support: support, profile: profile, overrides: environment)
+    }
+
+    static func resolveProfile(bundleMarker: String?, environment: [String: String], debugBuild: Bool) -> Profile {
+        if bundleMarker == "new-user-test" { return .newUserTest }
+        if debugBuild && environment["BOUNDAS_DATA_PROFILE"] == "production" { return .production }
+        return debugBuild ? .debug : .production
     }
 }
 

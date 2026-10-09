@@ -3,6 +3,23 @@ import CryptoKit
 import Combine
 import Foundation
 
+enum WorkspaceStoreError: LocalizedError {
+    case unreadable(URL, Error)
+    case invalid(URL, String)
+    case persistence(Error)
+
+    var errorDescription: String? {
+        switch self {
+        case .unreadable(let url, let error):
+            return "Unable to read Boundas Gate Folder state (\(url.lastPathComponent)): \(error.localizedDescription)"
+        case .invalid(_, let message):
+            return "Boundas Gate Folder state is invalid and was left untouched. \(message)"
+        case .persistence(let error):
+            return "Unable to save Boundas Gate Folder state: \(error.localizedDescription)"
+        }
+    }
+}
+
 @MainActor
 final class WorkspaceStore: ObservableObject {
     let gateway: SharedGatewayStore
@@ -16,9 +33,12 @@ final class WorkspaceStore: ObservableObject {
     private(set) var sideGateConnections: [UUID: SharedGatewayStore] = [:]
     private var sideGateSubscriptions: [UUID: AnyCancellable] = [:]
     private let makeSideGateway: @MainActor (WorkspaceRecord) -> SharedGatewayStore
+    private let identityForPath: (String) -> String
+    private let canonicalPathResolver: (String) -> String
     private let automaticallyRefresh: Bool
     private let configURL: URL
     private let c2cLogDirectory: URL
+    private var lastPersistenceError: Error?
 
     var runningCount: Int { sideGateWorkspaces.filter { $0.canOperateSideGate && sideGateConnections[$0.id]?.status?.running == true }.count }
     var healthyConnectionCount: Int { sideGateWorkspaces.filter { $0.canOperateSideGate && sideGateConnections[$0.id]?.usable == true }.count }
@@ -54,17 +74,22 @@ final class WorkspaceStore: ObservableObject {
 
     init(configURL: URL? = nil, client: (any SideGateClient)? = nil,
          gateway: SharedGatewayStore? = nil, automaticallyRefresh: Bool = true,
-         sideGatewayFactory: (@MainActor (WorkspaceRecord) -> SharedGatewayStore)? = nil) {
+         sideGatewayFactory: (@MainActor (WorkspaceRecord) -> SharedGatewayStore)? = nil,
+         c2cIDResolver: ((String) -> String)? = nil,
+         canonicalPathResolver: ((String) -> String)? = nil) throws {
         self.makeSideGateway = sideGatewayFactory ?? {
             SharedGatewayStore(automaticallyRefresh: false, gateSourceID: $0.id.uuidString.lowercased())
         }
         self.automaticallyRefresh = automaticallyRefresh
+        self.identityForPath = c2cIDResolver ?? Self.c2cID(for:)
+        self.canonicalPathResolver = canonicalPathResolver ?? Self.canonicalPath(_:)
         self.configURL = configURL ?? AppDataPaths.current.workspaces
         self.client = client ?? C2CClient()
-        self.gateway = gateway ?? SharedGatewayStore(automaticallyRefresh: automaticallyRefresh)
+        self.gateway = gateway ?? SharedGatewayStore(automaticallyRefresh: false)
         c2cLogDirectory = AppDataPaths.current.c2cLogs
-        load()
+        try load()
         guard automaticallyRefresh else { return }
+        self.gateway.startAutomaticRefresh()
         Task { [weak self] in
             while let self {
                 await self.refreshAll()
@@ -108,9 +133,9 @@ final class WorkspaceStore: ObservableObject {
     private func rememberEndpoint(_ workspace: WorkspaceRecord, connection: SharedGatewayStore) {
         guard let url = connection.status?.mcpURL,
               let index = workspaces.firstIndex(where: { $0.id == workspace.id && $0.canOperateSideGate }) else { return }
-        let oldURL = workspaces[index].lastObservedMCPURL
+        let original = workspaces[index]
         workspaces[index].observeMCPURL(url)
-        if oldURL != workspaces[index].lastObservedMCPURL { save() }
+        if workspaces[index] != original, !save() { workspaces[index] = original }
     }
 
     func addFolder() {
@@ -141,8 +166,8 @@ final class WorkspaceStore: ObservableObject {
             alertMessage = "搵唔到呢個 folder：\(trimmed)"
             return false
         }
-        let canonicalPath = String(cString: resolved)
         free(resolved)
+        let canonicalPath = canonicalPathResolver(expanded)
         let canonical = URL(fileURLWithPath: canonicalPath, isDirectory: true)
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: canonicalPath, isDirectory: &isDirectory),
@@ -172,8 +197,12 @@ final class WorkspaceStore: ObservableObject {
             return true
         }
 
-        let digest = SHA256.hash(data: Data(canonicalPath.lowercased().utf8))
-        let c2cID = digest.map { String(format: "%02x", $0) }.joined().prefix(12)
+        let c2cID = identityForPath(canonicalPath)
+        if Self.hasIdentityCollision(canonicalPath: canonicalPath, c2cID: c2cID, in: workspaces,
+                                     canonicalizer: canonicalPathResolver) {
+            alertMessage = "This Folder conflicts with an existing Boundas Gate Folder identity and can't be added safely."
+            return false
+        }
         let folderName = canonical.lastPathComponent
         let displayName = workspaces.contains(where: { $0.name == folderName })
             ? "\(folderName) · \(canonical.deletingLastPathComponent().lastPathComponent)"
@@ -255,8 +284,9 @@ final class WorkspaceStore: ObservableObject {
         guard let index = workspaces.firstIndex(where: { $0.id == workspace.id }) else { return }
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        let original = workspaces[index]
         workspaces[index].name = trimmed
-        save()
+        if !save() { workspaces[index] = original }
     }
 
     // One polling pass; independent of the currently selected Gate.
@@ -343,8 +373,10 @@ final class WorkspaceStore: ObservableObject {
             workspaces[index].lastKnownMCPURL = original.lastKnownMCPURL
             workspaces[index].sideGateRemovalState = .failed
             workspaces[index].sideGateRemovalError = error.localizedDescription
-            save()
-            alertMessage = "Remove Side Gate 未完成，可以 Retry：\(error.localizedDescription)"
+            let persistedRetry = save()
+            alertMessage = persistedRetry
+                ? "Remove Side Gate 未完成，可以 Retry：\(error.localizedDescription)"
+                : "Remove Side Gate 已完成外部清理，但未能儲存 Retry 狀態；請保留此設定檔並稍後重試。"
             return
         }
         try? FileManager.default.removeItem(at: GateUIContext.side(workspace).setupFile(in: configURL.deletingLastPathComponent()))
@@ -369,9 +401,16 @@ final class WorkspaceStore: ObservableObject {
         NSWorkspace.shared.activateFileViewerSelecting([target])
     }
 
-    private func load() {
-        guard let data = try? Data(contentsOf: configURL),
-              let saved = try? JSONDecoder().decode([WorkspaceRecord].self, from: data) else { return }
+    private func load() throws {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: configURL.path) else { return }
+        let data: Data
+        do { data = try Data(contentsOf: configURL) }
+        catch { throw WorkspaceStoreError.unreadable(configURL, error) }
+        let saved: [WorkspaceRecord]
+        do { saved = try JSONDecoder().decode([WorkspaceRecord].self, from: data) }
+        catch { throw WorkspaceStoreError.invalid(configURL, "JSON could not be decoded.") }
+        try Self.validate(saved, source: configURL)
         workspaces = saved.map { record in
             var record = record
             if record.sideGateAdded == nil {
@@ -383,7 +422,56 @@ final class WorkspaceStore: ObservableObject {
             }
             return record
         }
-        if workspaces != saved { save() }
+        if workspaces != saved, !save() {
+            throw WorkspaceStoreError.persistence(lastPersistenceError ?? CocoaError(.fileWriteUnknown))
+        }
+    }
+
+    private static func validate(_ records: [WorkspaceRecord], source: URL) throws {
+        var seenIDs = Set<UUID>()
+        var seenPaths = Set<String>()
+        var seenC2CIDs: [String: String] = [:]
+        for record in records {
+            guard !record.path.isEmpty, record.path.hasPrefix("/"),
+                  Self.isValidC2CID(record.c2cID) else {
+                throw WorkspaceStoreError.invalid(source, "A Folder identity is structurally invalid.")
+            }
+            guard seenIDs.insert(record.id).inserted else {
+                throw WorkspaceStoreError.invalid(source, "Duplicate Folder identities were found.")
+            }
+            let canonical = Self.canonicalPath(record.path)
+            guard seenPaths.insert(canonical).inserted else {
+                throw WorkspaceStoreError.invalid(source, "Duplicate Folder paths were found.")
+            }
+            if let existing = seenC2CIDs[record.c2cID], existing != canonical {
+                throw WorkspaceStoreError.invalid(source, "Two different Folders share one identity.")
+            }
+            seenC2CIDs[record.c2cID] = canonical
+        }
+    }
+
+    private static func isValidC2CID(_ value: String) -> Bool {
+        value.range(of: #"^[a-f0-9]{12}$"#, options: .regularExpression) != nil
+    }
+
+    static func canonicalPath(_ path: String) -> String {
+        if let resolved = realpath(path, nil) {
+            let value = String(cString: resolved)
+            free(resolved)
+            return value
+        }
+        return URL(fileURLWithPath: path).standardizedFileURL.path
+    }
+
+    static func c2cID(for canonicalPath: String) -> String {
+        SHA256.hash(data: Data(canonicalPath.lowercased().utf8))
+            .map { String(format: "%02x", $0) }.joined().prefix(12).description
+    }
+
+    static func hasIdentityCollision(canonicalPath path: String, c2cID: String, in records: [WorkspaceRecord],
+                                     canonicalizer: ((String) -> String)? = nil) -> Bool {
+        let resolve = canonicalizer ?? { Self.canonicalPath($0) }
+        return records.contains { $0.c2cID == c2cID && resolve($0.path) != path }
     }
 
     @discardableResult
@@ -394,8 +482,10 @@ final class WorkspaceStore: ObservableObject {
             let data = try JSONEncoder().encode(workspaces)
             try data.write(to: configURL, options: .atomic)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configURL.path)
+            lastPersistenceError = nil
             return true
         } catch {
+            lastPersistenceError = error
             alertMessage = "無法儲存 Folders：\(error.localizedDescription)"
             return false
         }

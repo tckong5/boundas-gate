@@ -13,9 +13,9 @@ final class SideGateRuntimeOwnerTests: XCTestCase {
         let client = LifecycleClient()
         let log = root.appendingPathComponent("diagnostics.log")
         let main = client.makeGateway(SharedGatewayStore.selectionID, logFile: log)
-        let store = WorkspaceStore(configURL: root.appendingPathComponent("folders.json"), client: client,
-                                   gateway: main, automaticallyRefresh: false,
-                                   sideGatewayFactory: { client.makeGateway($0.id, logFile: log) })
+        let store = try WorkspaceStore(configURL: root.appendingPathComponent("folders.json"), client: client,
+                                       gateway: main, automaticallyRefresh: false,
+                                       sideGatewayFactory: { client.makeGateway($0.id, logFile: log) })
         for name in ["Side A", "Side B"] {
             let folder = root.appendingPathComponent(name)
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)

@@ -30,6 +30,36 @@ final class ConnectionDiagnosticsTests: XCTestCase {
             XCTAssertNil(EndpointAddress.mcpURL(origin + path))
         }
     }
+    func testTransportFailureExposesTypedSystemVPNDiagnosticAndHealthySkipsDetection() async {
+        let base = "https://gate.example.ts.net"
+        var failPublic = true, commands = 0
+        MockConnectionProtocol.respond = { request in
+            if failPublic && request.url?.host == "gate.example.ts.net" { throw URLError(.cannotConnectToHost) }
+            if request.url!.path.hasSuffix("/health") {
+                return (200, [:], Data("{\"service\":\"c2c-bridge\",\"workspaceId\":\"\(self.workspaceID)\",\"status\":\"ok\"}".utf8))
+            }
+            return (401, ["WWW-Authenticate": "Bearer resource_metadata=\"\(base)/.well-known/oauth-protected-resource/mcp\""], Data())
+        }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockConnectionProtocol.self]
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel() }
+        let network = SystemTailscaleVPN(command: { _, args in
+            commands += 1
+            return .init(code: 0, output: args.contains("list")
+                ? "* (Connected) 653460BD-8619-4BC4-9EDD-7FB5658CF3BE VPN (io.tailscale.ipn.macsys) \"Tailscale\""
+                : "ip_address: 100.71.254.85")
+        })
+        let checker = ConnectionChecker(session: session, systemVPN: network)
+        let failed = await checker.check(workspaceID: workspaceID, status: status(publicURL: base, tunnelURL: base))
+        XCTAssertEqual(failed.systemTailscaleInterception?.hostname, "gate.example.ts.net")
+        XCTAssertEqual(commands, 2)
+        failPublic = false
+        let healthy = await checker.check(workspaceID: workspaceID, status: status(publicURL: base, tunnelURL: base))
+        XCTAssertTrue(healthy.isUsable)
+        XCTAssertNil(healthy.systemTailscaleInterception)
+        XCTAssertEqual(commands, 2)
+    }
     func testGatewayHealthRequiresGatewayServiceIdentity() async {
         let stable = "https://mac.example.ts.net/c2c/abcdef123456"
         MockConnectionProtocol.respond = { request in
@@ -42,7 +72,7 @@ final class ConnectionDiagnosticsTests: XCTestCase {
         configuration.protocolClasses = [MockConnectionProtocol.self]
         let session = URLSession(configuration: configuration)
         defer { session.invalidateAndCancel() }
-        let checker = ConnectionChecker(session: session)
+        let checker = ConnectionChecker(session: session, systemVPN: .init(command: { _, _ in .init(code: 0, output: "") }))
         let status = status(publicURL: stable, tunnelURL: stable)
         let gatewayResult = await checker.check(workspaceID: "abcdef123456", status: status, service: "boundas-gateway")
         let bridgeResult = await checker.check(workspaceID: "abcdef123456", status: status)
@@ -93,7 +123,7 @@ final class ConnectionDiagnosticsTests: XCTestCase {
         configuration.protocolClasses = [MockConnectionProtocol.self]
         let session = URLSession(configuration: configuration)
         defer { session.invalidateAndCancel() }
-        return await ConnectionChecker(session: session).check(workspaceID: workspaceID, status: status ?? self.status())
+        return await ConnectionChecker(session: session, systemVPN: .init(command: { _, _ in .init(code: 0, output: "") })).check(workspaceID: workspaceID, status: status ?? self.status())
     }
 
     private func healthy(_ request: URLRequest) -> (Int, [String: String], Data) {

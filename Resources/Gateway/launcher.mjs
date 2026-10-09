@@ -3,7 +3,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { migrateMainToShared, readMainMigration, candidateRegistry, verifyMigrationRoute } from './main-migration.mjs';
+import { migrateMainToShared, readMainMigration, mainMigrationDiagnosticStatus, candidateRegistry, verifyMigrationRoute } from './main-migration.mjs';
 import { Registry, secureWrite } from './registry.mjs';
 import { loadBackend, startGateway } from './server.mjs';
 import { withLock } from '../Tailscale/provider.mjs';
@@ -82,7 +82,7 @@ async function status() {
     desiredRunning: connection.desiredRunning ?? observed.state === 'healthy',
     connectionRemembered: connection.desiredRunning !== null,
     gatewayID: config?.id, roots: registry.active(), configuredMCPURL: config?.configuredMCPURL,
-    sharedMigrationAvailable: transport === 'external', endpointMigrationPending: !!migration,
+    sharedMigrationAvailable: transport === 'external', ...mainMigrationDiagnosticStatus(registry),
     transport, sharedTunnel: transport === 'embedded', transportSetup, aiConnections: readAIConnections(registry.directory, config?.id) };
 }
 try {

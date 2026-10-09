@@ -11,6 +11,21 @@ export function readMainMigration(registry) {
   if (journal.candidateURL && (!/^https:\/\/[a-z0-9-]+(?:\.[a-z0-9-]+)+\.ts\.net\/mcp$/.test(journal.candidateURL) || journal.candidateURL !== `https://${journal.hostname}/mcp`)) throw new Error('Main migration endpoint is invalid.');
   return journal;
 }
+// Public status deliberately exposes no config snapshot or journal internals.
+export function mainMigrationDiagnosticStatus(registry) {
+  const journal = readMainMigration(registry);
+  if (!journal) return { endpointMigrationPending: false };
+  const detail = journal.failureDetail;
+  const failure = detail && ['health', 'discovery', 'resource', 'mcp'].includes(detail.step)
+    && ['transient', 'semantic'].includes(detail.kind) ? {
+      step: detail.step, kind: detail.kind,
+      ...(typeof detail.code === 'string' && /^[A-Za-z0-9_]{1,64}$/.test(detail.code) ? { code: detail.code } : {}),
+      ...(Number.isInteger(detail.status) && detail.status >= 100 && detail.status <= 599 ? { status: detail.status } : {})
+    } : undefined;
+  return { endpointMigrationPending: true,
+    ...(journal.candidateURL ? { endpointMigrationCandidateURL: journal.candidateURL } : {}),
+    ...(failure ? { endpointMigrationFailureDetail: failure } : {}) };
+}
 export function candidateRegistry(registry) {
   return { directory: registry.directory, read: () => ({ ...registry.read(), transport: 'embedded', sharedIngress: true }),
     connection: () => ({ ...registry.connection(), stableMCPURL: null }) };

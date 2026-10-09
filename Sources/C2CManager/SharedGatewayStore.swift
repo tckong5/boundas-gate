@@ -74,6 +74,20 @@ struct GatewayAIConnection: Decodable, Identifiable, Equatable {
     var needsAttention: Bool { !isAuthorized && ["authorized", "invalid", "revoked"].contains(authorizationState) }
 }
 
+struct EndpointMigrationFailureDetail: Decodable {
+    let step: String
+    let kind: String
+    let code: String?
+    let status: Int?
+    var isTransportReadinessFailure: Bool {
+        guard kind == "transient", status == nil, ["health", "discovery", "resource", "mcp"].contains(step), let code else { return false }
+        return ["NETWORK_ERROR", "ENOTFOUND", "EAI_AGAIN", "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT",
+                "EHOSTUNREACH", "ENETUNREACH", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_SOCKET",
+                "ERR_TLS_CERT_ALTNAME_INVALID", "CERT_HAS_EXPIRED", "CERT_NOT_YET_VALID",
+                "UNABLE_TO_VERIFY_LEAF_SIGNATURE", "DEPTH_ZERO_SELF_SIGNED_CERT", "TypeError", "TimeoutError", "AbortError"].contains(code)
+    }
+}
+
 struct GatewayStatus: Decodable {
     var setupManagementVersion: Int? = nil
     var clientManagementVersion: Int? = nil
@@ -81,6 +95,8 @@ struct GatewayStatus: Decodable {
     var sharedTunnel: Bool? = nil
     var sharedMigrationAvailable: Bool? = nil
     var endpointMigrationPending: Bool? = nil
+    var endpointMigrationCandidateURL: String? = nil
+    var endpointMigrationFailureDetail: EndpointMigrationFailureDetail? = nil
     let running: Bool?
     let state: String
     let reason: String?
@@ -163,6 +179,8 @@ final class SharedGatewayStore: ObservableObject {
     static let selectionID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
     @Published private(set) var status: GatewayStatus?
     @Published private(set) var diagnostics: ConnectionDiagnostics?
+    @Published private(set) var migrationInterception: SystemTailscaleVPN.Interception?
+    var systemTailscaleInterception: SystemTailscaleVPN.Interception? { migrationInterception ?? diagnostics?.systemTailscaleInterception }
     @Published private(set) var pairing: GatewayPairing?
     @Published private(set) var folderCodes: [String: GatewayFolderCode] = [:]
     @Published private(set) var working = false
@@ -176,6 +194,7 @@ final class SharedGatewayStore: ObservableObject {
     private let client: any GatewayClient
     private let checkConnection: (String, WorkspaceStatus, String) async -> ConnectionDiagnostics
     private let diagnosticsLogFile: URL?
+    private let systemVPN: SystemTailscaleVPN
     private var observationEnabled = true
     private let gateSourceID: String?
     private var revision = 0
@@ -196,11 +215,13 @@ final class SharedGatewayStore: ObservableObject {
     }
     var connectionTitle: String {
         if reconnecting { return "重新連線中…" }
+        if systemTailscaleInterception != nil { return "Tailscale VPN is intercepting this Gate" }
         if diagnostics?.hasPublicDNSFailure == true && !visiblyChecking { return "暫時搵唔到連線地址" }
         if waitingToReconnect && !visiblyChecking { return "等待重新連線" }
         return connectionState.title
     }
     var connectionHint: String {
+        if systemTailscaleInterception != nil { return "Disconnect the old system Tailscale VPN, then recheck Secure Access." }
         if diagnostics?.hasPublicDNSFailure == true { return publicDNSHint }
         if waitingToReconnect { return "恢復後沿用原有 ChatGPT 設定。" }
         if usable {
@@ -212,6 +233,7 @@ final class SharedGatewayStore: ObservableObject {
         return ""
     }
     var userFacingMessage: String? {
+        if systemTailscaleInterception != nil { return connectionHint }
         guard let message else { return nil }
         if status?.transport == "embedded", status?.transportSetup?.state != "ready" {
             return status?.transportSetup?.message ?? "請完成內置連線登入，再重新檢查。"
@@ -235,7 +257,8 @@ final class SharedGatewayStore: ObservableObject {
     init(automaticallyRefresh: Bool = true, gateSourceID: String? = nil,
          client: (any GatewayClient)? = nil,
          connectionCheck: ((String, WorkspaceStatus, String) async -> ConnectionDiagnostics)? = nil,
-         diagnosticsLogFile: URL? = nil) {
+         diagnosticsLogFile: URL? = nil, systemVPN: SystemTailscaleVPN = .init()) {
+        self.systemVPN = systemVPN
         self.client = client ?? C2CClient()
         let checker = ConnectionChecker()
         self.checkConnection = connectionCheck ?? { id, status, service in
@@ -284,6 +307,7 @@ final class SharedGatewayStore: ObservableObject {
         statusConfirmed = false
         status = nil
         diagnostics = nil
+        migrationInterception = nil
         pairing = nil
         folderCodes.removeAll()
         message = nil
@@ -327,6 +351,13 @@ final class SharedGatewayStore: ObservableObject {
             if let id = status.gatewayID {
                 let checked = await checkConnection(id, status.bridgeStatus, gateSourceID == nil ? "boundas-gateway" : "c2c-bridge")
                 guard currentRevision == revision else { return }
+                let pendingEvidence: SystemTailscaleVPN.Interception?
+                if gateSourceID == nil, !checked.isUsable,
+                   status.running != true || checked.publicEndpoint.isTransportFailure || checked.publicMCP.isTransportFailure {
+                    pendingEvidence = await systemVPN.detectPendingMigration(status)
+                } else { pendingEvidence = nil }
+                guard currentRevision == revision else { return }
+                migrationInterception = pendingEvidence
                 diagnostics = checked
                 // Record state transitions, not every background poll. These
                 // checks contain no credentials or file-operation responses.
@@ -341,11 +372,12 @@ final class SharedGatewayStore: ObservableObject {
                     reconnectPolicy.reset()
                     if !working { message = nil }
                 }
-            } else { diagnostics = nil }
+            } else { diagnostics = nil; migrationInterception = nil }
         } catch {
             guard currentRevision == revision else { return }
             diagnostics = nil
             statusConfirmed = false
+            migrationInterception = nil
             message = error.localizedDescription
         }
     }
@@ -428,6 +460,7 @@ final class SharedGatewayStore: ObservableObject {
 
     func repair() async {
         guard !working else { return }
+        if systemTailscaleInterception != nil { await refresh(); return }
         if status?.running == true, status?.tunnel?.running == true,
            diagnostics?.hasPublicDNSFailure == true, diagnostics?.address.passed == true {
             await refresh()
@@ -443,7 +476,7 @@ final class SharedGatewayStore: ObservableObject {
     }
 
     var canRepairDNSCache: Bool {
-        statusConfirmed && status?.running == true && status?.tunnel?.running == true
+        systemTailscaleInterception == nil && statusConfirmed && status?.running == true && status?.tunnel?.running == true
             && diagnostics?.hasPublicDNSFailure == true && diagnostics?.address.passed == true
     }
 
@@ -471,6 +504,20 @@ final class SharedGatewayStore: ObservableObject {
         }
     }
 
+    func disconnectSystemTailscale(confirmed: Bool, network: SystemTailscaleVPN = .init()) async {
+        guard confirmed, !working, let evidence = systemTailscaleInterception else { return }
+        working = true
+        operation = "disconnect-system-tailscale"
+        revision += 1
+        checking = false
+        checkingInBackground = false
+        message = nil
+        defer { working = false; operation = nil }
+        do {
+            try await network.disconnect(evidence, confirmed: confirmed) { await self.refresh() }
+        } catch { message = error.localizedDescription }
+    }
+
     func restart() async {
         guard !working, statusConfirmed, status?.state != "unknown", status?.running != nil else { return }
         restarting = true
@@ -487,7 +534,7 @@ final class SharedGatewayStore: ObservableObject {
     }
 
     func recoverIfNeeded() async {
-        guard status?.endpointMigrationPending != true, observationEnabled, reconnectPolicy.shouldAttempt(status: status, usable: usable, confirmed: statusConfirmed,
+        guard systemTailscaleInterception == nil, status?.endpointMigrationPending != true, observationEnabled, reconnectPolicy.shouldAttempt(status: status, usable: usable, confirmed: statusConfirmed,
                                              busy: working || checking, diagnostics: diagnostics) else { return }
         reconnecting = true
         defer { reconnecting = false }

@@ -164,3 +164,36 @@ test('normal runtime validation tolerates readiness delay without identity/login
  },fastTiming(10000))});
  assert.equal(setups,1);assert.equal(opens,1);assert.equal(finalizes,1);assert.equal(normalAttempts,6);assert.equal(readMainMigration(registry),null);
 }));
+
+test('pending diagnostic status exposes only safe candidate and failure fields after cleanup', () => fixture(async registry => {
+ const { mainMigrationDiagnosticStatus } = await import('../../Resources/Gateway/main-migration.mjs');
+ const journal = {gateID:'012345abc678',phase:'checking-endpoint',original:{transport:'external',secret:'never expose'},
+   hostname:'new.tail.ts.net',candidateURL:'https://new.tail.ts.net/mcp',failure:'private failure',
+   failureDetail:{step:'health',kind:'transient',code:'NETWORK_ERROR',privateBody:'never expose'},cleanupFailure:'internal'};
+ secureWrite(path.join(registry.directory,'endpoint-migration.json'), journal);
+ assert.deepEqual(mainMigrationDiagnosticStatus(registry), {
+   endpointMigrationPending:true,endpointMigrationCandidateURL:'https://new.tail.ts.net/mcp',
+   endpointMigrationFailureDetail:{step:'health',kind:'transient',code:'NETWORK_ERROR'}});
+ assert.equal(fs.existsSync(path.join(registry.directory,'runtime.json')),false);
+ const { execFile } = await import('node:child_process');
+ const { promisify } = await import('node:util');
+ fs.writeFileSync(path.join(registry.directory,'workspaces.json'),'[]');
+ const result = await promisify(execFile)(process.execPath,[path.resolve('Resources/Gateway/launcher.mjs'),'status',registry.directory],{
+   env:{...process.env,BOUNDAS_GATEWAY_DIR:registry.directory,BOUNDAS_WORKSPACES_FILE:path.join(registry.directory,'workspaces.json'),
+     BOUNDAS_STATE_DIR:path.join(registry.directory,'tailscale'),C2C_STATE_DIR:path.join(registry.directory,'c2c')}});
+ const status=JSON.parse(result.stdout);
+ assert.equal(status.running,false);
+ assert.equal(status.endpointMigrationPending,true);
+ assert.equal(status.endpointMigrationCandidateURL,journal.candidateURL);
+ assert.deepEqual(status.endpointMigrationFailureDetail,{step:'health',kind:'transient',code:'NETWORK_ERROR'});
+ for(const key of ['original','failure','failureDetail','hostname','phase','cleanupFailure']) assert.equal(key in status,false);
+ assert.deepEqual(JSON.parse(fs.readFileSync(path.join(registry.directory,'endpoint-migration.json'))),journal);
+}));
+test('migration diagnostic projection omits absent candidate and strips arbitrary failure fields', () => fixture(async registry => {
+ const { mainMigrationDiagnosticStatus } = await import('../../Resources/Gateway/main-migration.mjs');
+ assert.deepEqual(mainMigrationDiagnosticStatus(registry),{endpointMigrationPending:false});
+ secureWrite(path.join(registry.directory,'endpoint-migration.json'),{gateID:'012345abc678',phase:'pending',original:{transport:'external'},
+   failureDetail:{step:'health',kind:'semantic',code:'IDENTITY_MISMATCH',status:200,token:'secret'}});
+ assert.deepEqual(mainMigrationDiagnosticStatus(registry),{endpointMigrationPending:true,
+   endpointMigrationFailureDetail:{step:'health',kind:'semantic',code:'IDENTITY_MISMATCH',status:200}});
+}));

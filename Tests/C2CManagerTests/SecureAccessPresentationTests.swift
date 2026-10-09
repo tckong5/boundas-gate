@@ -13,6 +13,20 @@ final class SecureAccessPresentationTests: XCTestCase {
         XCTAssertEqual(signedOut.button, "Sign In")
         XCTAssertFalse(signedOut.description.contains("authorize secure access for this Side Gate"))
     }
+    func testInterceptionHasDedicatedActionAndDoesNotRouteMigrationOrDNSRepair() {
+        var diagnostics = ConnectionDiagnostics(checkedAt: .now, bridge: .success("ok"), localMCP: .success("ok"),
+            publicEndpoint: .failure("DNS", error: URLError(.dnsLookupFailed)), publicMCP: .pending("pending"), address: .success("ok"))
+        diagnostics.systemTailscaleInterception = .init(hostname: "gate.example.ts.net", service: .init(
+            id: "653460BD-8619-4BC4-9EDD-7FB5658CF3BE", provider: SystemTailscaleVPN.provider, connected: true))
+        for side in [false, true] {
+            let result = SecureAccessPresentation.make(status: status("ready"), complete: false, message: nil, diagnostics: diagnostics, isSideGate: side)
+            XCTAssertEqual(result.action, .disconnectSystemTailscale)
+            XCTAssertEqual(result.button, "Disconnect Old Tailscale VPN")
+            XCTAssertTrue(result.description.contains("intercepting"))
+        }
+        XCTAssertNil(SecureAccessPresentation.migrationAction(for: .disconnectSystemTailscale, isSideGate: false, pending: true))
+        XCTAssertNil(SecureAccessPresentation.make(status: status("ready"), complete: true, message: nil, diagnostics: diagnostics).action)
+    }
     private func status(_ state: String, external: Bool = false, login: String? = nil, approval: String? = nil) -> GatewayStatus {
         var value = GatewayStatus(running: false, state: "stopped", reason: nil, gatewayID: "main", port: nil,
             pid: nil, publicUrl: nil, tunnel: nil, tokenCount: 0, pairingActive: false, roots: [],

@@ -1,7 +1,7 @@
 import Foundation
 
 struct SecureAccessPresentation {
-    enum Action: Equatable { case setUp, signIn, approve, repair, repairDNS, recheck }
+    enum Action: Equatable { case setUp, signIn, approve, repair, repairDNS, disconnectSystemTailscale, recheck }
     static func migrationAction(for action: Action, isSideGate: Bool, pending: Bool) -> String? {
         guard pending, !isSideGate, [.setUp, .signIn, .approve, .repair].contains(action) else { return nil }
         return "migrate-shared"
@@ -19,6 +19,7 @@ struct SecureAccessPresentation {
         case .signIn: return isSideGate && !shared ? "Continue with Tailscale" : "Sign In"
         case .approve: return "Continue Authorization"
         case .repair, .repairDNS: return "Repair"
+        case .disconnectSystemTailscale: return "Disconnect Old Tailscale VPN"
         case .recheck: return "Recheck"
         case nil: return ""
         }
@@ -30,13 +31,16 @@ struct SecureAccessPresentation {
     }
 
     static func make(status: GatewayStatus?, complete: Bool, message: String?, diagnostics: ConnectionDiagnostics? = nil,
-                     isSideGate: Bool = false) -> Self {
+                     isSideGate: Bool = false, interception: SystemTailscaleVPN.Interception? = nil) -> Self {
         let external = status?.transport == "external"
         func result(_ text: String, _ action: Action?, _ url: URL? = nil) -> Self {
             .init(description: text, action: action, external: external, isSideGate: isSideGate, shared: status?.sharedTunnel == true, approvalURL: url,
                   canSignOut: status?.transport != "cloudflare" && status?.transportSetup?.state == "ready" && action != .signIn)
         }
         if complete { return result(status?.transport == "cloudflare" ? "Secure access is available." : "Tailscale · Connected", nil) }
+        if interception != nil || diagnostics?.systemTailscaleInterception != nil {
+            return result("Tailscale VPN is intercepting this Gate. An older Tailscale system connection is routing this Gate through a private tailnet address instead of Boundas Gate’s public Secure Access endpoint.", .disconnectSystemTailscale)
+        }
         if status?.running == true, status?.tunnel?.running == true,
            diagnostics?.hasPublicDNSFailure == true, diagnostics?.address.passed == true {
             return result("This Mac can't find your Gate's address. Repair can refresh its network cache, then check again.", .repairDNS)

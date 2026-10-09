@@ -12,6 +12,7 @@ struct GatewayReconnectPolicy {
     mutating func shouldAttempt(status: GatewayStatus?, usable: Bool, confirmed: Bool,
                                 busy: Bool, diagnostics: ConnectionDiagnostics? = nil, now: Date = .now) -> Bool {
         guard confirmed, let status else { return false }
+        if diagnostics?.systemTailscaleInterception != nil { reset(); return false }
         if usable || status.desiredRunning != true || status.reconnectEnabled == false {
             reset()
             return false

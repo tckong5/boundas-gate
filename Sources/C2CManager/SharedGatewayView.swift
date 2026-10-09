@@ -24,6 +24,7 @@ struct GateConnectionContent: View {
     @State private var setupExpanded = false
     @State private var confirmTunnelLogout = false
     @State private var confirmDNSRepair = false
+    @State private var confirmSystemTailscaleDisconnect = false
     @State private var confirmSharedMigration = false
     @State private var revokeConnection: GatewayAIConnection?
     @State private var setupNotice: String?
@@ -60,6 +61,16 @@ struct GateConnectionContent: View {
         .onChange(of: gateway.status?.pairingActive) { _, _ in reconcileSetup() }
         .onChange(of: journey.presentationKey) { _, _ in
             if !setupExpanded { expandedOverride = nil }
+        }
+        .confirmationDialog("Disconnect Old Tailscale VPN?", isPresented: $confirmSystemTailscaleDisconnect) {
+            Button("Disconnect Old Tailscale VPN") {
+                Task {
+                    await gateway.disconnectSystemTailscale(confirmed: true)
+                    if let message = gateway.message { setupNotice = message }
+                }
+            }
+        } message: {
+            Text("Disconnect only this Mac’s old Tailscale VPN. Other services using that VPN may lose access until you reconnect it in Network Settings. Your Gate, Tailscale account, identities and VPN configuration are preserved.")
         }
         .confirmationDialog("Repair Secure Access?", isPresented: $confirmDNSRepair) {
             Button("Refresh Network Cache") { Task { await gateway.repairDNSCache() } }
@@ -130,6 +141,7 @@ struct GateConnectionContent: View {
     }
 
     private var gateTitle: String {
+        if gateway.systemTailscaleInterception != nil { return "Tailscale VPN is intercepting this Gate" }
         if mapEligible { return "Gate Open" }
         let title = journey.summaryTitle(opening: gateway.operation == "start-local" || gateway.operation == "start" || gateway.operation == "prepare-access",
             reopening: gateway.restarting || gateway.reconnecting || ["reconnect", "recover"].contains(gateway.operation ?? ""),
@@ -225,6 +237,22 @@ struct GateConnectionContent: View {
                     .padding(18).frame(width: 360)
                 }
             }
+            // A cleaned-up migration candidate is stopped: its recovery must
+            // remain accessible even while the normal Tunnel step is pending.
+            if !context.isSide, gateway.status?.endpointMigrationPending == true, gateway.status?.running != true {
+                VStack(alignment: .leading, spacing: 12) {
+                    if gateway.systemTailscaleInterception != nil {
+                        Text(secureAccess.description).font(.callout).foregroundStyle(.secondary)
+                        secureAccessAction
+                        Button("Open Network Settings") {
+                            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Network-Settings.extension")!)
+                        }.buttonStyle(.link)
+                    } else {
+                        Button("Retry Shared Secure Access Migration…") { confirmSharedMigration = true }
+                            .disabled(gateway.working || gateway.visiblyChecking)
+                    }
+                }
+            }
             if detailsExpanded {
                 GateConnectionStepper(journey: journey, explanation: stageExplanation,
                                       showConnections: journey.presentsContent(for: .aiConnection),
@@ -233,7 +261,8 @@ struct GateConnectionContent: View {
                         Button("Close Gate") { Task { _ = await gateway.perform("stop") } }
                             .buttonStyle(.bordered).controlSize(.small)
                             .disabled(gateway.working || gateway.visiblyChecking || gateway.reconnecting)
-                    } else if journey.presentsPrimaryAction(for: stage) {
+                    } else if journey.presentsPrimaryAction(for: stage)
+                        && !(stage == .local && !context.isSide && gateway.status?.endpointMigrationPending == true) {
                         if stage == .tunnel { secureAccessAction }
                         else { journeyAction }
                     }
@@ -253,6 +282,11 @@ struct GateConnectionContent: View {
                     Text(secureAccessDescription).font(.callout).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                         .help(gateway.status?.transportSetup?.message ?? gateway.diagnostics?.publicEndpoint.detail ?? "")
+                    if gateway.systemTailscaleInterception != nil {
+                        Button("Open Network Settings") {
+                            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Network-Settings.extension")!)
+                        }.buttonStyle(.link)
+                    }
                 }
             } else if mapEligible, let mapStore {
                 LiveGateActivityMap(store: mapStore, gateway: gateway, connectApp: { beginAISetup() })
@@ -276,7 +310,7 @@ struct GateConnectionContent: View {
 
     private var secureAccess: SecureAccessPresentation {
         .make(status: gateway.status, complete: journey.nodes[1] == .completed, message: gateway.message,
-              diagnostics: gateway.diagnostics, isSideGate: context.isSide)
+              diagnostics: gateway.diagnostics, isSideGate: context.isSide, interception: gateway.systemTailscaleInterception)
     }
 
     private var secureAccessChecking: Bool {
@@ -361,6 +395,8 @@ struct GateConnectionContent: View {
         case .repair:
             if gateway.status?.localOnly == true { _ = await gateway.perform("prepare-access") }
             else { await gateway.repair() }
+        case .disconnectSystemTailscale:
+            confirmSystemTailscaleDisconnect = true
         case .repairDNS:
             confirmDNSRepair = true
         case .recheck:

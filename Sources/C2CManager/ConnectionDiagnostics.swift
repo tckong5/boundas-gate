@@ -5,6 +5,7 @@ struct ConnectionCheck: Equatable {
     let state: State
     let detail: String
     var isDNSFailure = false
+    var isTransportFailure = false
     var passed: Bool { state == .passed }
 
     static func success(_ detail: String) -> Self { .init(state: .passed, detail: detail) }
@@ -12,7 +13,8 @@ struct ConnectionCheck: Equatable {
         let cause = error as NSError?
         let dnsFailure = cause?.domain == NSURLErrorDomain
             && [URLError.cannotFindHost.rawValue, URLError.dnsLookupFailed.rawValue].contains(cause?.code ?? 0)
-        return .init(state: .failed, detail: detail, isDNSFailure: dnsFailure)
+        return .init(state: .failed, detail: detail, isDNSFailure: dnsFailure, isTransportFailure: cause?.domain == NSURLErrorDomain
+            && [URLError.cannotFindHost, .dnsLookupFailed, .cannotConnectToHost, .networkConnectionLost, .timedOut, .secureConnectionFailed, .serverCertificateHasBadDate, .serverCertificateUntrusted, .serverCertificateHasUnknownRoot, .serverCertificateNotYetValid].map(\.rawValue).contains(cause?.code ?? 0))
     }
     static func pending(_ detail: String) -> Self { .init(state: .notChecked, detail: detail) }
 }
@@ -24,6 +26,7 @@ struct ConnectionDiagnostics {
     let publicEndpoint: ConnectionCheck
     let publicMCP: ConnectionCheck
     let address: ConnectionCheck
+    var systemTailscaleInterception: SystemTailscaleVPN.Interception? = nil
 
     var isUsable: Bool {
         bridge.passed && localMCP.passed && publicEndpoint.passed && publicMCP.passed && address.passed
@@ -73,8 +76,10 @@ struct ConnectionChecker {
     }
 
     private let session: URLSession
+    private let systemVPN: SystemTailscaleVPN
 
-    init(session: URLSession? = nil) {
+    init(session: URLSession? = nil, systemVPN: SystemTailscaleVPN = .init()) {
+        self.systemVPN = systemVPN
         if let session {
             self.session = session
         } else {
@@ -123,8 +128,13 @@ struct ConnectionChecker {
         } else {
             address = publicBase == nil ? .pending("未啟用公開連線") : .failure("Bridge／Tunnel URL 資料不完整")
         }
+        let interception: SystemTailscaleVPN.Interception?
+        if bridge.passed, localMCP.passed, address.passed, let host = publicBase?.host {
+            interception = await systemVPN.detect(hostname: host, transportFailure: publicEndpoint.isTransportFailure || publicMCP.isTransportFailure)
+        } else { interception = nil }
         return .init(checkedAt: Date(), bridge: bridge, localMCP: localMCP,
-                     publicEndpoint: publicEndpoint, publicMCP: publicMCP, address: address)
+                     publicEndpoint: publicEndpoint, publicMCP: publicMCP, address: address,
+                     systemTailscaleInterception: interception)
     }
 
     private func health(at base: URL, workspaceID: String, service: String) async -> ConnectionCheck {

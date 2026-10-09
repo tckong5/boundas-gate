@@ -17,6 +17,15 @@ final class GatewayReconnectPolicyTests: XCTestCase {
         return result
     }
 
+    func testInterceptionNeverAutomaticallyRestartsRoute() {
+        var diagnostics = ConnectionDiagnostics(checkedAt: .now, bridge: .success("ok"), localMCP: .success("ok"),
+            publicEndpoint: .failure("refused", error: URLError(.cannotConnectToHost)), publicMCP: .pending("pending"), address: .success("ok"))
+        diagnostics.systemTailscaleInterception = .init(hostname: "mac.example.ts.net", service: .init(
+            id: "653460BD-8619-4BC4-9EDD-7FB5658CF3BE", provider: SystemTailscaleVPN.provider, connected: true))
+        var policy = GatewayReconnectPolicy()
+        XCTAssertFalse(policy.shouldAttempt(status: status(), usable: false, confirmed: true, busy: false, diagnostics: diagnostics))
+        XCTAssertEqual(policy.attempts, 0)
+    }
     func testDisconnectedTunnelAndCrashedGatewayCanRecover() {
         for value in [status(), status(running: false, state: "stopped")] {
             var policy = GatewayReconnectPolicy()

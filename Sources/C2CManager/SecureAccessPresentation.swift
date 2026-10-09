@@ -2,6 +2,10 @@ import Foundation
 
 struct SecureAccessPresentation {
     enum Action: Equatable { case setUp, signIn, approve, repair, repairDNS, recheck }
+    static func migrationAction(for action: Action, isSideGate: Bool, pending: Bool) -> String? {
+        guard pending, !isSideGate, [.setUp, .signIn, .approve, .repair].contains(action) else { return nil }
+        return "migrate-shared"
+    }
     let description: String
     let action: Action?
     let external: Bool

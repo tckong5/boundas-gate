@@ -135,11 +135,11 @@ export function makeMcpServer(backend, registry, access = new FolderAccess(regis
 }
 
 export async function startGateway({ backendRoot, registry = new Registry(), tunnelProvider, persistRuntime = true, port = 0,
-  instanceID = randomBytes(32).toString('hex'), runtimePath, authFile, service = 'boundas-gateway', sideRoot }) {
+  instanceID = randomBytes(32).toString('hex'), runtimePath, authFile, service = 'boundas-gateway', sideRoot, migrationCandidateURL }) {
   const backend = await loadBackend(backendRoot);
   const config = registry.ensure();
   const connection = registry.connection();
-  const expectedURL = connection.stableMCPURL?.replace(/\/mcp$/, '') ?? null;
+  const expectedURL = migrationCandidateURL?.replace(/\/mcp$/, '') ?? connection.stableMCPURL?.replace(/\/mcp$/, '') ?? null;
   const provider = tunnelProvider ?? gatewayProvider(registry, { expectedURL });
   const access = new FolderAccess(registry);
   const activity = registry.sideMode ? null : new GateActivity(config.id);
@@ -154,7 +154,7 @@ export async function startGateway({ backendRoot, registry = new Registry(), tun
   const PairingManager = boundedPairingManager(backend.PairingManager);
   const pairing = new PairingManager(config.id);
   const cleanupTimer = setInterval(() => {
-    try { authStore.cleanupRegistrations(); }
+    try { if (!migrationCandidateURL) authStore.cleanupRegistrations(); }
     catch { console.error('OAuth registration cleanup failed; persistent store could not be updated.'); }
   }, 60000); cleanupTimer.unref();
   const app = backend.express(); app.disable('x-powered-by'); app.set('trust proxy', true);
@@ -184,6 +184,7 @@ export async function startGateway({ backendRoot, registry = new Registry(), tun
     pid: process.pid, port: localPort, adminToken, publicUrl: publicURL, instanceID, startedAt });
   const persist = () => { if (persistRuntime) secureWrite(runtimeFile, runtimeRecord()); };
   app.get('/health', (_req, res) => res.json({ service, workspaceId: config.id, status: 'ok', instanceID, startedAt }));
+  if (migrationCandidateURL) app.use('/oauth', (_req, res) => res.status(503).json({ error: 'temporarily_unavailable', error_description: 'Endpoint migration is being verified.' }));
   app.use('/oauth', backend.express.urlencoded({ extended: false, limit: '32kb' }), backend.express.json({ limit: '32kb' }));
   // Mounted at the root so security policy sees the full OAuth route path.
   app.use(oauthSecurity({ store: authStore }));
@@ -197,6 +198,7 @@ export async function startGateway({ backendRoot, registry = new Registry(), tun
   app.use(backend.createOAuthRouter({ store: authStore, pairing, workspaceName: 'Boundas Gate', getBaseUrl, logger: backend.logger }));
   const mcpHandler = backend.createMcpHttpHandler(() => makeMcpServer(backend, registry, access,
     token => typeof token === 'string' && authStore.verifyAccessToken(token).ok, activity), backend.logger);
+  if (migrationCandidateURL) app.all('/mcp', (_req, res) => res.status(401).set('WWW-Authenticate', `Bearer resource_metadata="${getBaseUrl()}/.well-known/oauth-protected-resource/mcp"`).json({ error: 'unauthorized' }));
   app.all('/mcp', backend.express.json({ limit: '1mb' }), backend.bearerAuth({ store: authStore, workspaceId: config.id, getBaseUrl, logger: backend.logger }), (req, res) => {
     // Removed/retiring Side membership rejects admission, while private admin
     // remains available to finish decommissioning. Policy locks only tools.
@@ -216,7 +218,7 @@ export async function startGateway({ backendRoot, registry = new Registry(), tun
   };
   app.get('/control/info', admin, (_req, res) => {
     try { res.json({ running: true, state: 'running', gatewayID: config.id, workspaceId: config.id, workspaceRoot: sideRoot,
-      instanceID, startedAt, port: localPort, pid: process.pid, publicUrl: publicURL, tunnel: provider.status(), tokenCount: authStore.tokenCount(), pairingActive: pairing.hasActiveSession(), setupManagementVersion: 1, accessCodeVersion: 1, connectionVersion: 1, authorizationVersion: 2, clientManagementVersion: 1, clientRevocationVersion: 1, folderAccess: access.status() }); }
+      instanceID, startedAt, migrationCandidate: !!migrationCandidateURL, port: localPort, pid: process.pid, publicUrl: publicURL, tunnel: provider.status(), tokenCount: authStore.tokenCount(), pairingActive: pairing.hasActiveSession(), setupManagementVersion: 1, accessCodeVersion: 1, connectionVersion: 1, authorizationVersion: 2, clientManagementVersion: 1, clientRevocationVersion: 1, folderAccess: access.status() }); }
     catch { res.status(503).json({ message: '共用設定無效，已拒絕存取。' }); }
   });
   if (activity) app.get('/control/activity', admin, (req, res) => {
@@ -272,7 +274,7 @@ export async function startGateway({ backendRoot, registry = new Registry(), tun
   app.post('/control/revoke', admin, (_req, res) => { pairing.invalidateAll(); access.revokeAll(); authStore.revokeAll(); res.json({ ok: true }); });
   app.post('/control/tunnel/start', admin, (_req, res) => {
     void provider.start(localPort, instanceID).then(url => {
-      registry.updateConnection({ stableMCPURL: `${url}/mcp` });
+      if (!migrationCandidateURL) registry.updateConnection({ stableMCPURL: `${url}/mcp` });
       publicURL = url; persist(); res.json({ ok: true, mcpUrl: `${url}/mcp` });
     }).catch(error => res.status(500).json({ ok: false, message: error.message }));
   });

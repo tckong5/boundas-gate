@@ -387,15 +387,15 @@ final class SharedGatewayStore: ObservableObject {
             } else if ["code-policy", "lock-folder"].contains(action), let workspaceID {
                 folderCodes[workspaceID] = nil
             } else if ["stop", "logout", "revoke"].contains(action) { folderCodes.removeAll() }
-            let loginSetup = ["login", "prepare-access"].contains(action) ? try JSONDecoder().decode(GatewayStatus.self, from: response).transportSetup : nil
+            let loginSetup = ["login", "prepare-access", "migrate-shared"].contains(action) ? try JSONDecoder().decode(GatewayStatus.self, from: response).transportSetup : nil
             // Open the command's URL immediately, before health checks or a
             // concurrent status refresh can replace this login response.
-            if action == "login" {
+            if action == "login" || action == "migrate-shared" {
                 if let url = loginSetup?.actionURL {
                     guard NSWorkspace.shared.open(url) else {
                         throw C2CClientError.commandFailed("未能開啟瀏覽器。請確認已設定預設瀏覽器，再按 Sign In。")
                     }
-                } else if loginSetup?.state != "ready" {
+                } else if action == "login" && loginSetup?.state != "ready" {
                     throw C2CClientError.commandFailed("未能取得 Tailscale 登入網址。請檢查網絡後再按 Sign In。")
                 }
             }
@@ -487,7 +487,7 @@ final class SharedGatewayStore: ObservableObject {
     }
 
     func recoverIfNeeded() async {
-        guard observationEnabled, reconnectPolicy.shouldAttempt(status: status, usable: usable, confirmed: statusConfirmed,
+        guard status?.endpointMigrationPending != true, observationEnabled, reconnectPolicy.shouldAttempt(status: status, usable: usable, confirmed: statusConfirmed,
                                              busy: working || checking, diagnostics: diagnostics) else { return }
         reconnecting = true
         defer { reconnecting = false }
@@ -496,7 +496,7 @@ final class SharedGatewayStore: ObservableObject {
 
     @discardableResult
     func signInTunnel() async -> Bool {
-        await perform("login")
+        await perform(status?.endpointMigrationPending == true ? "migrate-shared" : "login")
     }
 
     func copyURL(openChatGPT: Bool = false) {

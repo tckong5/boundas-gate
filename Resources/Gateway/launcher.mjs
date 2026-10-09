@@ -3,10 +3,11 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { migrateMainToShared, readMainMigration, candidateRegistry } from './main-migration.mjs';
 import { Registry, secureWrite } from './registry.mjs';
 import { loadBackend, startGateway } from './server.mjs';
 import { withLock } from '../Tailscale/provider.mjs';
-import { gatewaySetup, transportMode, tunnelAccount, retireSharedRoute } from '../Tailscale/embedded.mjs';
+import { gatewaySetup, transportMode, tunnelAccount, retireSharedRoute, embeddedSetup, SharedEmbeddedProvider } from '../Tailscale/embedded.mjs';
 import { readAIConnections } from './connection-status.mjs';
 import { readRuntime, observeRuntime } from './runtime-instance.mjs';
 import { diagnosticError } from './diagnostics.mjs';
@@ -44,7 +45,7 @@ async function stopGate() {
 }
 // Start only the loopback MCP/OAuth host. No provider preflight or account action.
 // Called under the existing Gate lock by both local and full startup paths.
-async function ensureLocalHost() {
+async function ensureLocalHost(candidate = false) {
   let current = await observation();
   if (current.state === 'unknown') throw new Error(current.reason);
   if (current.state === 'healthy' && current.legacy) {
@@ -58,7 +59,7 @@ async function ensureLocalHost() {
     fs.mkdirSync(registry.directory, { recursive: true, mode: 0o700 });
     const logFile = path.join(registry.directory, 'gateway.log');
     const descriptor = fs.openSync(logFile, 'a', 0o600); fs.chmodSync(logFile, 0o600);
-    const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'daemon', backendRoot, `--instance-id=${randomBytes(32).toString('hex')}`], { detached: true, stdio: ['ignore', descriptor, descriptor], env: process.env });
+    const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'daemon', backendRoot, `--instance-id=${randomBytes(32).toString('hex')}`, ...(candidate ? ['--migration-candidate'] : [])], { detached: true, stdio: ['ignore', descriptor, descriptor], env: process.env });
     child.unref(); fs.closeSync(descriptor);
     const deadline = Date.now() + 20000;
     do {
@@ -74,19 +75,24 @@ async function status() {
   const observed = await observation();
   const connection = registry.connection();
   const transport = transportMode(registry);
-  const transportSetup = config ? await gatewaySetup(registry) : undefined;
+  const migration = readMainMigration(registry);
+  const transportSetup = config ? migration ? await embeddedSetup(candidateRegistry(registry), { start: false, requestLogin: false }) : await gatewaySetup(registry) : undefined;
   return { ok: true, running: observed.state === 'unknown' ? null : observed.state === 'healthy', state: observed.state, reason: observed.reason,
     publicUrl: connection.stableMCPURL?.replace(/\/mcp$/, ''), ...observed.info, ...connection,
     desiredRunning: connection.desiredRunning ?? observed.state === 'healthy',
     connectionRemembered: connection.desiredRunning !== null,
     gatewayID: config?.id, roots: registry.active(), configuredMCPURL: config?.configuredMCPURL,
+    sharedMigrationAvailable: transport === 'external', endpointMigrationPending: !!migration,
     transport, sharedTunnel: transport === 'embedded', transportSetup, aiConnections: readAIConnections(registry.directory, config?.id) };
 }
 try {
+  if (readMainMigration(registry) && !['daemon', 'status', 'migrate-shared', 'connection-check'].includes(action)) throw new Error('Main endpoint migration needs Retry before lifecycle operations.');
   if (action === 'daemon') {
     const instanceID = input?.replace(/^--instance-id=/, '');
     if (!/^[a-f0-9]{64}$/.test(instanceID ?? '')) throw new Error('Gate instance ID 無效。');
-    const gateway = await startGateway({ backendRoot, registry, instanceID });
+    const candidate = process.argv.includes('--migration-candidate') ? readMainMigration(registry) : null;
+    if (process.argv.includes('--migration-candidate') && !candidate?.candidateURL) throw new Error('Candidate migration journal missing.');
+    const gateway = await startGateway({ backendRoot, registry, instanceID, ...(candidate ? { migrationCandidateURL: candidate.candidateURL, tunnelProvider: new SharedEmbeddedProvider(candidateRegistry(registry), { expectedURL: candidate.candidateURL.replace(/\/mcp$/, '') }) } : {}) });
     let closing = false;
     const close = () => { if (!closing) { closing = true; void gateway.close().finally(() => process.exit(0)); } };
     process.on('SIGTERM', close); process.on('SIGINT', close);
@@ -117,6 +123,40 @@ try {
       await control(current.runtime, `/control/${action}`, 'POST', 12000, JSON.parse(input));
       output(await status());
     });
+  } else if (action === 'migrate-shared') {
+    const result = await withLock(path.join(registry.directory, 'main-migration-lock'), () => migrateMainToShared({ registry,
+      setup: view => embeddedSetup(view, { start: true, requestLogin: true }),
+      open: async () => {
+        const previous = await observation();
+        if (previous.state === 'unknown') throw new Error(previous.reason);
+        if (previous.state === 'healthy') {
+          await control(previous.runtime, '/control/shutdown');
+          const deadline = Date.now() + 20000;
+          while (runtime() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 200));
+          if (runtime()) throw new Error('Previous Main runtime did not stop.');
+        }
+        const current = await ensureLocalHost(true);
+        try { await control(current.runtime, '/control/tunnel/start'); }
+        catch (error) { await control(current.runtime, '/control/shutdown'); throw error; }
+        return current.runtime;
+      },
+      finalize: async journal => {
+        let current = await observation();
+        if (current.state === 'unknown') throw new Error(current.reason);
+        if (current.state === 'healthy' && current.info.migrationCandidate !== false) {
+          await control(current.runtime, '/control/shutdown');
+          const deadline = Date.now() + 20000;
+          while (runtime() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 200));
+          if (runtime()) throw new Error('Candidate Main runtime did not stop.');
+        }
+        current = await ensureLocalHost();
+        await control(current.runtime, '/control/tunnel/start');
+        const info = await control(current.runtime, '/control/info', 'GET', 3000);
+        if (info.migrationCandidate !== false || `${info.publicUrl}/mcp` !== journal.candidateURL) throw new Error('Committed Main runtime endpoint mismatch.');
+        return { ...current.runtime, migrationCandidate: info.migrationCandidate };
+      },
+      cleanup: candidate => control(candidate, '/control/shutdown') }));
+    output({ ...await status(), ...result });
   } else if (action === 'status') { output(await status()); }
   else if (action === 'start-local') {
     await withLock(registry.directory, async () => {

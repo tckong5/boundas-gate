@@ -80,7 +80,7 @@ struct GateConnectionContent: View {
         .confirmationDialog("Use Shared Secure Access?", isPresented: $confirmSharedMigration) {
             Button("Use Shared Secure Access") { Task { _ = await gateway.perform("migrate-shared") } }
         } message: {
-            Text("This Side Gate will use Main Gate’s Tailscale sign-in and domain. Its Server URL will change: update the URL in each AI app; the app may require authorization again. Folder permissions and other Gates are preserved.")
+            Text(context.isSide ? "This Side Gate will use Main Gate’s Tailscale sign-in and domain. Its Server URL will change: update the URL in each AI app; the app may require authorization again. Folder permissions and other Gates are preserved." : "This Main Gate will use bundled Shared Secure Access. Its public MCP URL will change; update the Server URL in ChatGPT. Gate identity, Folders and OAuth registrations are preserved. The old external Tailscale device is not deleted.")
         }
         .confirmationDialog("Remove MCP Connection?", isPresented: Binding(
             get: { revokeConnection != nil }, set: { if !$0 { revokeConnection = nil } }
@@ -338,6 +338,11 @@ struct GateConnectionContent: View {
     }
 
     private func handleSecureAccess(_ action: SecureAccessPresentation.Action) async {
+        if let migration = SecureAccessPresentation.migrationAction(for: action, isSideGate: context.isSide,
+                                                                    pending: gateway.status?.endpointMigrationPending == true) {
+            if !(await gateway.perform(migration)) { setupNotice = gateway.message }
+            return
+        }
         switch action {
         case .setUp:
             _ = await gateway.perform("prepare-access")

@@ -24,17 +24,15 @@ enum C2CClientError: LocalizedError {
 
 @MainActor
 protocol SideGateClient {
-    func status(for workspace: WorkspaceRecord) async throws -> WorkspaceStatus
-    func start(_ workspace: WorkspaceRecord) async throws -> StartResult
-    func reconnect(_ workspace: WorkspaceRecord) async throws -> StartResult
-    func stop(_ workspace: WorkspaceRecord) async throws
-    func pair(_ workspace: WorkspaceRecord) async throws -> PairingCode
-    func unpair(_ workspace: WorkspaceRecord) async throws
     func decommission(_ workspace: WorkspaceRecord) async throws
-    func tailscaleSetup() async throws -> TailscaleSetup
 }
 
-struct C2CClient: SideGateClient {
+@MainActor
+protocol GatewayClient {
+    func gateway(_ action: String, input: Data?, sourceID: String?) async throws -> Data
+}
+
+struct C2CClient: SideGateClient, GatewayClient {
     private let cliPath = RuntimePaths.current.cli
     private static let resolvedNodePath = findSupportedNode()
 
@@ -109,45 +107,6 @@ struct C2CClient: SideGateClient {
         return CommandResult(code: exitCode, output: output.trimmingCharacters(in: .whitespacesAndNewlines), error: error.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
-    func status(for workspace: WorkspaceRecord) async throws -> WorkspaceStatus {
-        let result = try await sideLifecycle("status", workspace)
-        guard result.code == 0 else { throw C2CClientError.commandFailed(result.error.isEmpty ? result.output : result.error) }
-        guard let data = result.output.data(using: .utf8),
-              let status = try? JSONDecoder().decode(WorkspaceStatus.self, from: data) else {
-            throw C2CClientError.invalidOutput(result.output)
-        }
-        return status
-    }
-
-    func start(_ workspace: WorkspaceRecord) async throws -> StartResult {
-        try await launch(workspace, action: "start-local")
-    }
-
-    func reconnect(_ workspace: WorkspaceRecord) async throws -> StartResult {
-        try await launch(workspace, action: "reconnect")
-    }
-
-    private func launch(_ workspace: WorkspaceRecord, action: String) async throws -> StartResult {
-        let result = try await sideLifecycle(action, workspace)
-        guard let data = result.output.data(using: .utf8),
-              let response = try? JSONDecoder().decode(StartResult.self, from: data) else {
-            throw C2CClientError.commandFailed(result.error.isEmpty ? result.output : result.error)
-        }
-        guard result.code == 0 && response.ok else {
-            throw C2CClientError.commandFailed(response.message ?? response.error ?? result.error)
-        }
-        return response
-    }
-
-    func tailscaleSetup() async throws -> TailscaleSetup {
-        let result = try await run(["preflight"], entry: resource("Tailscale/launcher.mjs"))
-        guard result.code == 0, let data = result.output.data(using: .utf8),
-              let setup = try? JSONDecoder().decode(TailscaleSetup.self, from: data) else {
-            throw C2CClientError.commandFailed("未能檢查 Tailscale，請先開啟 Tailscale App。")
-        }
-        return setup
-    }
-
     func gateway(_ action: String, input: Data? = nil, sourceID: String? = nil) async throws -> Data {
         let helper = try resource(sourceID == nil ? "Gateway/launcher.mjs" : "Gateway/side-lifecycle.mjs")
         let backend = URL(fileURLWithPath: cliPath).deletingLastPathComponent().deletingLastPathComponent().path
@@ -170,11 +129,6 @@ struct C2CClient: SideGateClient {
             throw C2CClientError.commandFailed(response.message ?? "共用連線未能完成操作。")
         }
         return data
-    }
-
-    func stop(_ workspace: WorkspaceRecord) async throws {
-        let result = try await sideLifecycle("stop", workspace)
-        guard result.code == 0 else { throw C2CClientError.commandFailed(result.error.isEmpty ? result.output : result.error) }
     }
 
     func decommission(_ workspace: WorkspaceRecord) async throws {
@@ -202,19 +156,4 @@ struct C2CClient: SideGateClient {
         return result
     }
 
-    func pair(_ workspace: WorkspaceRecord) async throws -> PairingCode {
-        let result = try await sideLifecycle("pair", workspace)
-        guard result.code == 0,
-              let data = result.output.data(using: .utf8),
-              let response = try? JSONDecoder().decode(PairingResult.self, from: data),
-              response.ok else {
-            throw C2CClientError.commandFailed(result.error.isEmpty ? result.output : result.error)
-        }
-        return PairingCode(value: response.pairingCode, expiresAt: Date(timeIntervalSince1970: response.expiresAt / 1000))
-    }
-
-    func unpair(_ workspace: WorkspaceRecord) async throws {
-        let result = try await sideLifecycle("unpair", workspace)
-        guard result.code == 0 else { throw C2CClientError.commandFailed(result.error.isEmpty ? result.output : result.error) }
-    }
 }

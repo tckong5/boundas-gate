@@ -443,7 +443,7 @@ private struct FolderSharingDot: View {
     }
 }
 
-private struct SideGateLifecycleDot: View {
+struct SideGateLifecycleDot: View {
     @ObservedObject var store: WorkspaceStore
     @ObservedObject var gateway: SharedGatewayStore
     let workspace: WorkspaceRecord

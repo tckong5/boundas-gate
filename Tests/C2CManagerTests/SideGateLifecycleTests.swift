@@ -2,32 +2,67 @@ import XCTest
 @testable import C2CManager
 
 @MainActor
-private final class LifecycleClient: SideGateClient {
+final class LifecycleClient: SideGateClient, GatewayClient {
     var calls: [(String, UUID)] = []
     var running: Set<UUID> = []
+    var localOnly: Set<UUID> = []
+    var pairs: [UUID: GatewayPairing] = [:]
+    var authorizedClients: [UUID: String] = [:]
     var failRemoval = false
     var removalObserved: ((WorkspaceRecord) -> Void)?
-    func status(for workspace: WorkspaceRecord) async throws -> WorkspaceStatus {
-        calls.append(("status", workspace.id))
-        return .init(running: running.contains(workspace.id), state: "stopped", reason: nil,
-                     port: nil, pid: nil, publicUrl: nil, tunnel: nil, tokenCount: 0, pairingActive: false)
+    var heldStatusID: UUID?
+    var statusContinuation: CheckedContinuation<Data, Error>?
+    var decommissionContinuation: CheckedContinuation<Void, Error>?
+    var holdDecommission = false
+    var pairLifetime: TimeInterval = 300
+    var createdSideGateIDs: [UUID] = []
+
+    func gateway(_ action: String, input: Data?, sourceID: String?) async throws -> Data {
+        let id = sourceID.flatMap(UUID.init(uuidString:)) ?? SharedGatewayStore.selectionID
+        calls.append((action, id))
+        switch action {
+        case "start-local": running.insert(id); localOnly.insert(id)
+        case "stop": running.remove(id); pairs[id] = nil
+        case "pair":
+            let expires = Date().addingTimeInterval(pairLifetime).timeIntervalSince1970 * 1000
+            let session = UUID().uuidString
+            let code = "fixture-" + session
+            pairs[id] = GatewayPairing(sessionID: session, pairingCode: code, expiresAt: expires, roots: [])
+            return try JSONSerialization.data(withJSONObject: ["ok": true, "sessionID": session, "pairingCode": code, "expiresAt": expires, "roots": []])
+        case "cancel-setup", "revoke": pairs[id] = nil
+        default: break
+        }
+        let data = try statusData(id)
+        if action == "status", heldStatusID == id {
+            heldStatusID = nil
+            return try await withCheckedThrowingContinuation { statusContinuation = $0 }
+        }
+        return data
     }
-    func start(_ workspace: WorkspaceRecord) async throws -> StartResult {
-        calls.append(("start", workspace.id)); running.insert(workspace.id)
-        return .init(ok: true, mcpUrl: nil, connectorName: nil, error: nil, message: nil)
+    func statusData(_ id: UUID) throws -> Data {
+        let open = running.contains(id)
+        let client: [[String: Any]] = authorizedClients[id].map { [["clientID": $0, "name": $0,
+            "authorizationState": "authorized", "authorizationExpiresAt": Date().addingTimeInterval(3600).timeIntervalSince1970 * 1000]] } ?? []
+        return try JSONSerialization.data(withJSONObject: ["ok": true, "running": open, "state": open ? "healthy" : "stopped",
+            "gatewayID": String(id.uuidString.replacingOccurrences(of: "-", with: "").prefix(12)).lowercased(),
+            "port": 56148, "pid": 1, "roots": [], "tokenCount": client.count,
+            "pairingActive": pairs[id] != nil, "desiredRunning": open, "localOnly": localOnly.contains(id),
+            "tunnel": ["running": open && !localOnly.contains(id)], "aiConnections": client])
     }
-    func reconnect(_ workspace: WorkspaceRecord) async throws -> StartResult {
-        calls.append(("reconnect", workspace.id)); running.insert(workspace.id)
-        return .init(ok: true, mcpUrl: nil, connectorName: nil, error: nil, message: nil)
+    func makeGateway(_ id: UUID, logFile: URL) -> SharedGatewayStore {
+        if id != SharedGatewayStore.selectionID { createdSideGateIDs.append(id) }
+        return SharedGatewayStore(automaticallyRefresh: false,
+            gateSourceID: id == SharedGatewayStore.selectionID ? nil : id.uuidString.lowercased(), client: self,
+            connectionCheck: { _, _, _ in
+                .init(checkedAt: Date(), bridge: .success("fixture"), localMCP: .success("fixture"),
+                      publicEndpoint: .success("fixture"), publicMCP: .success("fixture"), address: .success("fixture"))
+            }, diagnosticsLogFile: logFile)
     }
-    func stop(_ workspace: WorkspaceRecord) async throws { calls.append(("stop", workspace.id)); running.remove(workspace.id) }
-    func pair(_ workspace: WorkspaceRecord) async throws -> PairingCode { .init(value: "TEST", expiresAt: .distantFuture) }
-    func unpair(_ workspace: WorkspaceRecord) async throws {}
-    func tailscaleSetup() async throws -> TailscaleSetup { .init(state: "ready", hostname: nil, message: "") }
     func decommission(_ workspace: WorkspaceRecord) async throws {
         calls.append(("remove", workspace.id)); removalObserved?(workspace)
+        if holdDecommission { try await withCheckedThrowingContinuation { decommissionContinuation = $0 } }
         if failRemoval { throw C2CClientError.commandFailed("test cleanup failure") }
-        running.remove(workspace.id)
+        running.remove(workspace.id); pairs[workspace.id] = nil; authorizedClients[workspace.id] = nil
     }
 }
 
@@ -56,7 +91,7 @@ final class SideGateLifecycleTests: XCTestCase {
         let folder = URL(fileURLWithPath: String(cString: resolved))
         let client = LifecycleClient()
         let store = WorkspaceStore(configURL: folder.appendingPathComponent("records.json"), client: client,
-                                   automaticallyRefresh: false)
+                                   automaticallyRefresh: false, sideGatewayFactory: { client.makeGateway($0.id, logFile: folder.appendingPathComponent("diagnostics.log")) })
         return (folder, store, client)
     }
 
@@ -67,8 +102,8 @@ final class SideGateLifecycleTests: XCTestCase {
         XCTAssertTrue(store.addPath(folder.path))
         let record = try XCTUnwrap(store.workspaces.first)
         XCTAssertFalse(record.belongsToSideGates)
-        await store.refreshAll(); await store.startAll(); await store.stopAll(); await store.reconnectAll()
-        await store.start(record); await store.stop(record); await store.restart(record)
+        await store.refreshAll(); await store.startAll(); await store.stopAll()
+        await store.toggleSideGate(record)
         await store.removeSideGate(record)
         XCTAssertTrue(client.calls.isEmpty)
         XCTAssertEqual(store.runningCount, 0)
@@ -91,12 +126,12 @@ final class SideGateLifecycleTests: XCTestCase {
         XCTAssertTrue(store.addPath(second.path))
         XCTAssertEqual(store.sideGateWorkspaces.count, 2)
         await store.startAll()
-        XCTAssertEqual(Set(client.calls.filter { $0.0 == "start" }.map { $0.1 }), Set(store.workspaces.map(\.id)))
+        XCTAssertEqual(Set(client.calls.filter { $0.0 == "start-local" }.map { $0.1 }), Set(store.workspaces.map(\.id)))
         XCTAssertEqual(store.runningCount, 2)
         client.calls.removeAll()
-        await store.reconnectAll()
-        XCTAssertEqual(Set(client.calls.filter { $0.0 == "reconnect" }.map { $0.1 }), Set(store.sideGateWorkspaces.map(\.id)))
-        XCTAssertFalse(client.calls.contains { $0.0 == "start" })
+        await store.refreshAll()
+        XCTAssertEqual(Set(client.calls.filter { $0.0 == "status" }.map { $0.1 }), Set(store.sideGateWorkspaces.map(\.id)))
+        XCTAssertFalse(client.calls.contains { $0.0 == "start-local" || $0.0 == "login" })
         await store.stopAll()
         XCTAssertEqual(store.runningCount, 0)
     }
@@ -249,7 +284,7 @@ final class SideGateLifecycleTests: XCTestCase {
         XCTAssertEqual(store.sideGateWorkspaces.count, 1)
         XCTAssertEqual(store.workspaces[0].sideGateRemovalState, .failed)
         client.calls.removeAll()
-        await store.startAll(); await store.refreshAll(); await store.reconnectAll()
+        await store.startAll(); await store.refreshAll()
         XCTAssertTrue(client.calls.isEmpty)
         let restored = WorkspaceStore(configURL: folder.appendingPathComponent("records.json"), client: client, automaticallyRefresh: false)
         XCTAssertEqual(restored.workspaces[0].sideGateRemovalState, .failed)

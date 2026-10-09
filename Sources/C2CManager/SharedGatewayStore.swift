@@ -173,8 +173,10 @@ final class SharedGatewayStore: ObservableObject {
     @Published private(set) var statusConfirmed = false
     @Published private(set) var reconnecting = false
     @Published var message: String?
-    private let client = C2CClient()
-    private let checker = ConnectionChecker()
+    private let client: any GatewayClient
+    private let checkConnection: (String, WorkspaceStatus, String) async -> ConnectionDiagnostics
+    private let diagnosticsLogFile: URL?
+    private var observationEnabled = true
     private let gateSourceID: String?
     private var revision = 0
     private var lastConnectionSummary: String?
@@ -229,7 +231,16 @@ final class SharedGatewayStore: ObservableObject {
         "呢部 Mac 暫時搵唔到 Gate 地址。可按 Secure Access 嘅 Repair 清理網絡快取，再重新檢查。"
     }
 
-    init(automaticallyRefresh: Bool = true, gateSourceID: String? = nil) {
+    init(automaticallyRefresh: Bool = true, gateSourceID: String? = nil,
+         client: (any GatewayClient)? = nil,
+         connectionCheck: ((String, WorkspaceStatus, String) async -> ConnectionDiagnostics)? = nil,
+         diagnosticsLogFile: URL? = nil) {
+        self.client = client ?? C2CClient()
+        let checker = ConnectionChecker()
+        self.checkConnection = connectionCheck ?? { id, status, service in
+            await checker.check(workspaceID: id, status: status, service: service)
+        }
+        self.diagnosticsLogFile = diagnosticsLogFile
         self.gateSourceID = gateSourceID
         guard automaticallyRefresh && gateSourceID == nil else { return }
         Task { [weak self] in
@@ -255,7 +266,24 @@ final class SharedGatewayStore: ObservableObject {
             }
     }
 
+    /// Retire this Side owner's observations before the backend decommission.
+    /// Pending responses are ignored and this instance cannot restart/pair again.
+    func suspendForDecommission() {
+        guard gateSourceID != nil else { return }
+        observationEnabled = false
+        revision += 1
+        checking = false
+        checkingInBackground = false
+        statusConfirmed = false
+        status = nil
+        diagnostics = nil
+        pairing = nil
+        folderCodes.removeAll()
+        message = nil
+    }
+
     func refresh(background: Bool = false) async {
+        guard observationEnabled else { return }
         guard !checking else {
             // Reuse an ongoing background check when the user clicks refresh,
             // and keep its visual feedback active until that check finishes.
@@ -272,7 +300,7 @@ final class SharedGatewayStore: ObservableObject {
             }
         }
         do {
-            let response = try await client.gateway("status", sourceID: gateSourceID)
+            let response = try await client.gateway("status", input: nil, sourceID: gateSourceID)
             let status = try JSONDecoder().decode(GatewayStatus.self, from: response)
             guard currentRevision == revision else { return }
             if self.status?.running != status.running || self.status?.gatewayID != status.gatewayID
@@ -290,7 +318,7 @@ final class SharedGatewayStore: ObservableObject {
             }
             if let pairing, pairing.expiration <= Date() || status.pairingActive == false { self.pairing = nil }
             if let id = status.gatewayID {
-                let checked = await checker.check(workspaceID: id, status: status.bridgeStatus, service: gateSourceID == nil ? "boundas-gateway" : "c2c-bridge")
+                let checked = await checkConnection(id, status.bridgeStatus, gateSourceID == nil ? "boundas-gateway" : "c2c-bridge")
                 guard currentRevision == revision else { return }
                 diagnostics = checked
                 // Record state transitions, not every background poll. These
@@ -298,7 +326,8 @@ final class SharedGatewayStore: ObservableObject {
                 let summary = GatewayDiagnosticsLog.connectionSummary(checked)
                 if summary != lastConnectionSummary {
                     GatewayDiagnosticsLog.record(.init(code: checked.isUsable ? 0 : 1, output: "", error: summary),
-                                                 action: "connection-check")
+                                                 action: "connection-check",
+                                                 file: diagnosticsLogFile ?? AppDataPaths.current.directory.appendingPathComponent("diagnostics/gateway-command.log"))
                     lastConnectionSummary = summary
                 }
                 if usable {
@@ -318,10 +347,11 @@ final class SharedGatewayStore: ObservableObject {
     func perform(_ action: String, selectedIDs: [String]? = nil, sourceID: String? = nil,
                  workspaceID: String? = nil, codeRequired: Bool? = nil, reconnectEnabled: Bool? = nil,
                  clientID: String? = nil, confirmedExternal: Bool? = nil, sessionIDs: [String]? = nil) async -> Bool {
-        guard !working else { return false }
+        guard observationEnabled, !working else { return false }
         working = true
         operation = action
         revision += 1
+        let currentRevision = revision
         checking = false
         checkingInBackground = false
         message = nil
@@ -341,6 +371,7 @@ final class SharedGatewayStore: ObservableObject {
             else if action == "confirm", usable, let url = status?.mcpURL { input = try JSONEncoder().encode(["url": url]) }
             else { input = nil }
             let response = try await client.gateway(action, input: input, sourceID: gateSourceID)
+            guard observationEnabled, currentRevision == revision else { return false }
             if action == "pair" { pairing = try JSONDecoder().decode(GatewayPairing.self, from: response) }
             else if ["configure", "remove-root", "stop", "logout", "revoke", "cancel-setup"].contains(action) { pairing = nil }
             if action == "folder-code" {
@@ -380,6 +411,7 @@ final class SharedGatewayStore: ObservableObject {
             }
             return true
         } catch {
+            guard observationEnabled, currentRevision == revision else { return false }
             let failure = error.localizedDescription
             await refresh()
             message = failure
@@ -448,7 +480,7 @@ final class SharedGatewayStore: ObservableObject {
     }
 
     func recoverIfNeeded() async {
-        guard reconnectPolicy.shouldAttempt(status: status, usable: usable, confirmed: statusConfirmed,
+        guard observationEnabled, reconnectPolicy.shouldAttempt(status: status, usable: usable, confirmed: statusConfirmed,
                                              busy: working || checking, diagnostics: diagnostics) else { return }
         reconnecting = true
         defer { reconnecting = false }

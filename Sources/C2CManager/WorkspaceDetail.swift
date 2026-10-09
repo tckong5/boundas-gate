@@ -3,7 +3,7 @@ import SwiftUI
 struct WorkspaceDetail: View {
     @ObservedObject var store: WorkspaceStore
     let workspace: WorkspaceRecord
-    @StateObject private var gateway: SharedGatewayStore
+    @ObservedObject var gateway: SharedGatewayStore
     @State private var confirmRemove = false
     @State private var showAdvanced = false
     @State private var renaming = false
@@ -13,7 +13,7 @@ struct WorkspaceDetail: View {
     init(store: WorkspaceStore, workspace: WorkspaceRecord) {
         self.store = store
         self.workspace = workspace
-        _gateway = StateObject(wrappedValue: store.sideGateway(for: workspace))
+        self.gateway = store.sideGateway(for: workspace)
     }
 
     private var working: Bool { store.busy[workspace.id] != nil || gateway.working || gateway.reconnecting }
@@ -41,7 +41,7 @@ struct WorkspaceDetail: View {
                     FolderPasscodeButton(gateway: gateway, workspace: workspace, configurationChanged: false)
                     Menu {
                         Button("Rename") { beginRename() }
-                        Button("Recheck") { Task { await gateway.refresh(); await store.refresh(workspace) } }
+                        Button("Recheck") { Task { await gateway.refresh() } }
                         Button("Advanced…") { showAdvanced = true }
                         Divider()
                         Button("Remove Side Gate…", role: .destructive) { confirmRemove = true }

@@ -121,7 +121,7 @@ Swift：55 tests PASS；Gateway／Tunnel Node：52 tests PASS。最後 Side life
 - `Sources/C2CManager/GateConnectionJourney.swift`
 - `Sources/C2CManager/SharedGatewayView.swift`
 - `Sources/C2CManager/C2CManagerApp.swift`
-- `Sources/C2CManager/ConnectionGuidance.swift`
+- `Sources/C2CManager/ConnectionGuidance.swift`（後續 [runtime ownership cleanup](side-gate-runtime-owner.md) 已移除無 production caller 嘅 legacy helper）
 
 ### Runtime
 

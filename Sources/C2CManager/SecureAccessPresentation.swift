@@ -1,12 +1,5 @@
 import Foundation
 
-struct TailscaleSetup: Decodable {
-    let state: String
-    let hostname: String?
-    let message: String
-    var ready: Bool { state == "ready" }
-}
-
 struct SecureAccessPresentation {
     enum Action: Equatable { case setUp, signIn, approve, repair, repairDNS, recheck }
     let description: String

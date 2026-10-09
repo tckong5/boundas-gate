@@ -77,31 +77,9 @@ struct WorkspaceStatus: Decodable {
     }
 }
 
-struct StartResult: Decodable {
-    let ok: Bool
-    let mcpUrl: String?
-    let connectorName: String?
-    let error: String?
-    let message: String?
-}
-
-struct PairingResult: Decodable {
-    let ok: Bool
-    let pairingCode: String
-    let expiresAt: Double
-}
-
-struct PairingCode: Equatable {
-    let value: String
-    let expiresAt: Date
-}
-
 enum WorkspaceOperation: String {
     case move = "Moving…"
     case remove = "Removing…"
     case start = "啟動中"
     case stop = "停止中"
-    case restart = "重新啟動中"
-    case pair = "產生配對碼中"
-    case diagnose = "檢查連線中"
 }

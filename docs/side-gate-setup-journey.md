@@ -17,6 +17,8 @@ Rename, Recheck, Advanced and confirmed Remove Side Gate live in the header menu
 
 WorkspaceStore owns one shared observation/reconnect store per Side Gate, so recovery continues while Main Gate is selected. Main-only and removing/failed-removal Folders are excluded. The detail view uses the same store rather than an independent recovery loop.
 
+Side runtime status, diagnostics and pairing now belong exclusively to that cached `SharedGatewayStore`; legacy WorkspaceStore runtime dictionaries and duplicate checks are retired. See [runtime ownership](side-gate-runtime-owner.md) for lifecycle/concurrency protections and verification.
+
 ## Authorization and Passcode
 
 Each Side Gate keeps its own AuthStore file and Gate ID. Shared metadata/control routes support resumable setup and correlated OAuth completion. Existing legacy Side operation-scope credentials are recognized in authorization **display metadata** only when their token belongs to that Side Gate; bearer admission/security rules are unchanged. Authorized is not a live session assertion.

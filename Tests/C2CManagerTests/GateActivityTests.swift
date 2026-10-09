@@ -4,16 +4,16 @@ import SwiftUI
 
 final class GateActivityTests: XCTestCase {
     func testFolderConnectorStartsAtGateAndMatchesContinuousTrafficCurve() {
-        let gate = GateMapGeometry.gatePoint(width: 600)
+        let gate = CGPoint(x: 300, y: 185)
         var connector = Path()
-        GateMapGeometry.appendFolder(to: &connector, gate: gate, destinationX: 362)
+        GateMapGeometry.appendFolder(to: &connector, gate: gate, destination: CGPoint(x: 362, y: 282))
         var elements: [Path.Element] = []
         connector.forEach { elements.append($0) }
         XCTAssertEqual(elements.count, 2)
         guard case .move(let start) = elements.first else { return XCTFail("Missing connector origin") }
         XCTAssertEqual(start, gate)
         var routeElements: [Path.Element] = []
-        GateMapGeometry.route(sourceX: 238, gate: gate, destinationX: 362).forEach { routeElements.append($0) }
+        GateMapGeometry.route(source: CGPoint(x: 238, y: 104), gate: gate, destination: CGPoint(x: 362, y: 282)).forEach { routeElements.append($0) }
         XCTAssertEqual(routeElements.count, 3, "Request/response must remain a single continuous path")
         guard case .curve(let end, let c1, let c2) = elements.last,
               case .curve(let routeEnd, let routeC1, let routeC2) = routeElements.last else {
@@ -21,6 +21,107 @@ final class GateActivityTests: XCTestCase {
         }
         XCTAssertEqual(end, routeEnd); XCTAssertEqual(c1, routeC1); XCTAssertEqual(c2, routeC2)
     }
+    func testResponsiveLayersFitViewportAndStayIndependent() {
+        for width: CGFloat in [434, 574, 800, 1040] {
+            for apps in [1, 3, 8, 12] {
+                for folders in [2, 4, 8, 9, 12] {
+                    let layout = GateMapLayout(width: width, appCount: apps, folderCount: folders)
+                    XCTAssertEqual(layout.width, width)
+                    XCTAssertEqual(layout.gate.x, width / 2)
+                    for layer in [layout.apps, layout.folders] {
+                        XCTAssertLessThanOrEqual(layer.rows, 2)
+                        for point in layer.positions {
+                            XCTAssertGreaterThanOrEqual(point.x - (layer.labelWidth + 4) / 2, 12 - 0.01)
+                            XCTAssertLessThanOrEqual(point.x + (layer.labelWidth + 4) / 2, width - 12 + 0.01)
+                            XCTAssertGreaterThan(point.y - 43, 0)
+                            XCTAssertLessThan(point.y + 43, layout.height)
+                        }
+                    }
+                    XCTAssertEqual(layout.apps.positions, GateMapLayout(width: width, appCount: apps, folderCount: 1).apps.positions)
+                    XCTAssertEqual(layout.folders.labelWidth, GateMapLayout(width: width, appCount: 1, folderCount: folders).folders.labelWidth)
+                }
+            }
+        }
+        let sparse = GateMapLayout(width: 800, appCount: 1, folderCount: 4)
+        XCTAssertEqual(sparse.height, 385)
+        XCTAssertEqual(sparse.folders.rows, 1)
+        XCTAssertEqual(sparse.folders.positions[1].x - sparse.folders.positions[0].x, 124)
+        XCTAssertEqual(GateMapLayout(width: 900, appCount: 1, folderCount: 8).folders.rows, 1)
+        XCTAssertEqual(GateMapLayout(width: 434, appCount: 1, folderCount: 8).folders.rows, 2)
+        XCTAssertEqual(GateMapLayout(width: 1040, appCount: 1, folderCount: 9).folders.rows, 2)
+    }
+
+    func testOuterRowGeometryMatchesTrafficAndPreservesAILabelClearance() {
+        for width: CGFloat in [434, 574, 800] {
+            for count in [8, 9, 10, 12] {
+                let layout = GateMapLayout(width: width, appCount: count, folderCount: count)
+                for (layer, incoming) in [(layout.apps, true), (layout.folders, false)] {
+                    let labels = zip(layer.positions, layer.corridors).compactMap { point, corridor -> CGRect? in
+                        guard corridor == nil else { return nil }
+                        return CGRect(x: point.x - layer.labelWidth / 2, y: point.y + 5, width: layer.labelWidth, height: 38)
+                    }
+                    for index in layer.positions.indices where layer.corridors[index] != nil {
+                        var connector = Path()
+                        if incoming {
+                            GateMapGeometry.appendAI(to: &connector, source: layer.anchors[index], gate: layout.gate, corridor: layer.corridors[index])
+                        } else {
+                            GateMapGeometry.appendFolder(to: &connector, gate: layout.gate, destination: layer.anchors[index],
+                                                         corridor: layer.corridors[index])
+                        }
+                        if incoming {
+                            for sample in 1...400 {
+                                let point = connector.trimmedPath(from: 0, to: CGFloat(sample) / 400).cgPath.currentPoint
+                                XCTAssertFalse(labels.contains { $0.contains(point) }, "Curve crosses an AI label at \(width)/\(count): \(point)")
+                            }
+                        }
+                        let route = GateMapGeometry.route(source: layout.apps.anchors[0], gate: layout.gate,
+                            destination: layout.folders.anchors[index], incomingCorridor: layout.apps.corridors[0],
+                            outgoingCorridor: layout.folders.corridors[index])
+                        var moves = 0
+                        route.forEach { if case .move = $0 { moves += 1 } }
+                        XCTAssertEqual(moves, 1, "AI→Gate→Folder must be one continuous path")
+                        XCTAssertEqual(route.cgPath.currentPoint.x, layout.folders.anchors[index].x, accuracy: 0.001)
+                        XCTAssertEqual(route.cgPath.currentPoint.y, layout.folders.anchors[index].y, accuracy: 0.001)
+                        if !incoming {
+                            var staticElements: [String] = [], routeElements: [String] = []
+                            connector.forEach { staticElements.append(String(describing: $0)) }
+                            route.forEach { routeElements.append(String(describing: $0)) }
+                            XCTAssertEqual(Array(routeElements.suffix(staticElements.count - 1)), Array(staticElements.dropFirst()))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    func testEightFolderSecondRowUsesIndependentDirectCubicSweeps() {
+        for width: CGFloat in [434, 574, 800] {
+            let layout = GateMapLayout(width: width, appCount: 1, folderCount: 8)
+            let layer = layout.folders
+            let outer = layer.positions.indices.filter { layer.corridors[$0] != nil }
+            var departureXs: Set<CGFloat> = []
+            for index in outer {
+                var path = Path()
+                GateMapGeometry.appendFolder(to: &path, gate: layout.gate, destination: layer.anchors[index],
+                                             corridor: layer.corridors[index])
+                var elements: [Path.Element] = []
+                path.forEach { elements.append($0) }
+                XCTAssertEqual(elements.count, 2, "One direct curve, without intermediate trunks or junctions")
+                guard case .move(let start) = elements.first,
+                      case .curve(let end, let c1, let c2) = elements.last else {
+                    XCTFail("Expected Gate origin and one cubic curve"); continue
+                }
+                XCTAssertEqual(start, layout.gate)
+                XCTAssertEqual(end, layer.anchors[index])
+                XCTAssertGreaterThan(abs(c1.x - layout.gate.x), 20, "Leave Gate with a directional tangent")
+                XCTAssertGreaterThan(c1.y, start.y)
+                XCTAssertLessThan(c2.y, end.y)
+                departureXs.insert(c1.x)
+            }
+            XCTAssertEqual(departureXs.count, outer.count, "Each Folder has its own trajectory from Gate")
+        }
+    }
+
     private func client(_ id: String, state: String = "authorized") -> GatewayAIConnection {
         .init(clientID: id, name: id, authorizationState: state,
               authorizationExpiresAt: Date().addingTimeInterval(3600).timeIntervalSince1970 * 1000, reason: nil)

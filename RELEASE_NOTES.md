@@ -1,6 +1,6 @@
 # Boundas Gate 1.2.0（production build 7）
 
-目前係 release candidate。產品版本維持 1.2.0；production build number 由 6 提升至 7。
+目前係未發布嘅 open-source public beta candidate，**ad-hoc signed、未 Apple notarized**。產品版本維持 1.2.0，production build number 係 7。
 
 ## 今輪完成
 
@@ -9,7 +9,10 @@
 - Secure Access、Connect an AI App 同 Ready to Use 統一成 current setup journey。
 - Live Gate Activity Map 顯示 Gate、AI app、Folder topology 同 request activity。
 - Side Gate runtime state 由單一 owner 管理，避免重複 start、refresh、reconnect 或 stale state。
-- Boundas Gate branding 已完成；bundle identifier 改為 `com.boundasgate.app`。Production state migration implementation 同 fixture verification 已完成，真實 production migration 仍待 final acceptance；Gate identity 仍由既有 Gate state 提供。
+- Boundas Gate branding 已完成；bundle identifier 係 `com.boundasgate.app`。Production state migration 同 Main Gate external → Shared Secure Access migration 已完成並驗收；既有 Gate identity、Folder settings、OAuth 同 embedded identity continuity 保留。
+- Production MCP read acceptance 同 clean quit／reopen acceptance 已完成。
+- 關閉視窗只關 UI；menu bar Quit 會依次停止 Side、Main 同已驗證 helper，保留 desiredRunning 同所有 persistent identity／authorization。
+- Sparkle 2.10、Check for Updates 同原生 About panel 已完成；使用 EdDSA-signed archives。正式 appcast URL 尚待設定／發布，冇 feed 嘅 build 唔會自動檢查。
 - Workspace state fail closed：corrupt config、invalid Folder identity、duplicate Folder identity、duplicate canonical path 或 c2cID collision 都會停止啟動，唔會當成空白 Folder list。
 - Raw Debug 預設使用 `Boundas Gate Debug` profile；New User Test 使用獨立 profile，唔會讀取 production state。
 - Root `LICENSE` 加入 Boundas Gate MIT License；Runtime 內第三方 license 保持分開。
@@ -29,6 +32,8 @@
 
 ## 驗收狀態
 
+以下完整 suite counts 保留作 release-preparation baseline，唔代表每次後續 commit 都重跑完整 suite；後續 migration、Quit 同 Sparkle 使用相關 focused tests／packaged checks。
+
 | 項目 | 結果 |
 | --- | --- |
 | Swift suite | PASS，128 tests |
@@ -39,7 +44,7 @@
 | Notarization / stapling / Gatekeeper | 未執行；需要 `BOUNDAS_NOTARY_PROFILE` 及 Developer ID credentials |
 | Portable release smoke test | PASS；isolated bundle、embedded userspace core、login URL、retry identity 全部通過 |
 
-未有喺今輪執行真實 production migration，亦未接觸真實 Folder、OAuth token 或 Tailscale account。
+Production migration、production MCP read 同 quit／reopen identity continuity 已驗收。今次 pre-public repository cleanup 冇接觸 production data／runtime。
 
 ## Public release path
 
@@ -50,7 +55,7 @@
 ./scripts/package-release.sh
 ```
 
-正式 public path 必須提供：
+選用 Developer ID／notarization mode 時必須提供以下設定；目前 ad-hoc public beta candidate 未使用呢個 mode：
 
 ```sh
 BOUNDAS_BUILD_MODE=public
@@ -79,4 +84,4 @@ New User Test 會留喺：
 
 ## 下一步
 
-如有 Developer ID certificate 及 notarytool profile，先可以做真正 public release acceptance；完成 acceptance 後先執行真實 production migration。今輪唔會自行做 production data migration。
+完成 repo privacy／artwork 授權確認，設定正式 appcast URL，再另行批准 GitHub repository／release 發布。Production migration 已完成，唔需要重做。Developer ID／notarization 留待另一次明確批准嘅 release 工作。

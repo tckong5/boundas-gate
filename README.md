@@ -62,6 +62,14 @@ Secure Access 係 user-facing Tunnel management。Fresh/current Shared Secure Ac
 
 App 內置 Node.js、C2C backend、cloudflared 同 Tailscale userspace runtime。實際 bundle 亦保留 Node、C2C、cloudflared、Go／Tailscale 依賴嘅 license 文件；根目錄 [LICENSE](LICENSE) 只適用於 Boundas Gate 自己嘅程式碼。
 
+## Window、Quit 同更新
+
+關閉主視窗只會關閉 UI；Gate 繼續運行，可以由 menu bar 嘅 **Show Boundas Gate** 返回。**Quit Boundas Gate** 會依次停止 Side Gates、Main Gate 同已驗證屬於當前 profile 嘅 bundled helper，再退出 app；保留 desiredRunning、Folder、OAuth 同 Tailscale identity，下一次啟動可以重用既有設定。
+
+Main Gate external → Shared Secure Access 嘅明確 migration、production MCP read 同重啟 identity continuity 已驗收。既有 external endpoint 仍只會由用戶明確批准 migration，唔會靜默更換。
+
+Sparkle 2.10 更新整合已完成，menu bar 提供 **Check for Updates…** 同原生 **About Boundas Gate…**。Update archive 必須通過 EdDSA 驗證；私鑰只留喺 Login Keychain。目前正式 appcast URL 尚未設定，未設定 feed 嘅 build 唔會啟動更新檢查。發布設定及隔離測試方法見 [UPDATES.md](docs/UPDATES.md)。
+
 ## Passcode Protection
 
 Folder row 永遠顯示固定嘅 password-lock icon。icon 只表達 Passcode Protection policy On／Off，唔會因 temporary unlock 變成 open lock。Popover 會分開顯示：
@@ -134,7 +142,7 @@ Gateway integration tests 需要提供已驗證嘅 `BOUNDAS_C2C_ROOT`。Portable
 
 ## License
 
-Boundas Gate 自己嘅程式碼使用 MIT License。Runtime 內嘅 Node、C2C、cloudflared、Go 同 Tailscale 元件仍然受各自 upstream license 約束；請參閱 packaged Runtime 入面嘅 license 文件。
+Boundas Gate 自己嘅程式碼使用 MIT License。Node、C2C、cloudflared、Go、Tailscale 同 Sparkle 元件仍然受各自 upstream license 約束；請參閱 packaged Runtime 入面嘅 license 文件。Artwork 嘅公開散佈授權確認狀態見 [artwork provenance](docs/artwork-provenance.md)，唔應由 source code 嘅 MIT License 推斷第三方素材權利。
 
 ## 歷史文件
 

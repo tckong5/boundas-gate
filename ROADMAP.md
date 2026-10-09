@@ -63,12 +63,14 @@
 - [x] 舊固定地址預設沿用 external transport，身份／URL 唔一致時拒絕取代；保留 OAuth 同動態分享清單。
 - [x] 空白 HOME、冇 system Node／C2C 路徑驗證 CLI、內置核心同登入連結。
 - [ ] 完整新帳戶內置 Funnel → ChatGPT pairing → MCP 驗收、另一部實體 Mac 同 VPN 並用測試。
-- [ ] 提供可由 UI 明確確認嘅舊裝置 → 內置裝置遷移；目前唔會自動轉換。
+- [x] 提供可由 UI 明確確認嘅 Main Gate external → Shared Secure Access migration；production migration、MCP read 同重啟 identity continuity 已驗收，唔會自動轉換。
 - [x] 產生本機 DMG／ZIP、安裝說明及 SHA256SUMS；乾淨 staging 解壓後簽署驗證通過。
 - [x] 1.2.0 bundle runtime 重啟現有共用 Gateway 後，原有 Plugin 仍可列出已分享嘅 Folders 同讀取檔案，URL／OAuth 保留。
 - [ ] 將 DMG／ZIP 同版本說明發佈到 GitHub Releases。
 - [ ] Developer ID 簽署、notarization 同乾淨 Mac 首次開啟驗收。
-- [ ] Sparkle 自動更新：固定 GitHub release／appcast、簽署 update、版本通知及保留設定。待確定 repo URL 後接入。
+- [x] Sparkle 2.10 整合、EdDSA 驗證、原生更新／About UI、隔離 local tests 同簽署 appcast tooling。
+- [ ] 確定正式 GitHub／HTTPS appcast URL，產生 signed updates 並另行批准發布；未設定 feed 嘅 build 保持停用。
+- [x] Window close 保留 Gates；明確 menu bar Quit 停止 verified runtimes／helper，同時保留 desiredRunning、identity、OAuth 同 Folder state。
 
 ### V1.2：日常使用同連線可靠性
 

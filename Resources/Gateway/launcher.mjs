@@ -3,11 +3,11 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { migrateMainToShared, readMainMigration, candidateRegistry } from './main-migration.mjs';
+import { migrateMainToShared, readMainMigration, candidateRegistry, verifyMigrationRoute } from './main-migration.mjs';
 import { Registry, secureWrite } from './registry.mjs';
 import { loadBackend, startGateway } from './server.mjs';
 import { withLock } from '../Tailscale/provider.mjs';
-import { gatewaySetup, transportMode, tunnelAccount, retireSharedRoute, embeddedSetup, SharedEmbeddedProvider } from '../Tailscale/embedded.mjs';
+import { gatewaySetup, transportMode, tunnelAccount, retireSharedRoute, embeddedSetup, embeddedRequest, SharedEmbeddedProvider } from '../Tailscale/embedded.mjs';
 import { readAIConnections } from './connection-status.mjs';
 import { readRuntime, observeRuntime } from './runtime-instance.mjs';
 import { diagnosticError } from './diagnostics.mjs';
@@ -126,7 +126,7 @@ try {
   } else if (action === 'migrate-shared') {
     const result = await withLock(path.join(registry.directory, 'main-migration-lock'), () => migrateMainToShared({ registry,
       setup: view => embeddedSetup(view, { start: true, requestLogin: true }),
-      open: async () => {
+      open: async journal => {
         const previous = await observation();
         if (previous.state === 'unknown') throw new Error(previous.reason);
         if (previous.state === 'healthy') {
@@ -136,7 +136,10 @@ try {
           if (runtime()) throw new Error('Previous Main runtime did not stop.');
         }
         const current = await ensureLocalHost(true);
-        try { await control(current.runtime, '/control/tunnel/start'); }
+        try {
+          await control(current.runtime, '/control/tunnel/start');
+          verifyMigrationRoute(await embeddedRequest(candidateRegistry(registry), '/status'), journal.candidateURL, current.runtime);
+        }
         catch (error) { await control(current.runtime, '/control/shutdown'); throw error; }
         return current.runtime;
       },
@@ -151,6 +154,7 @@ try {
         }
         current = await ensureLocalHost();
         await control(current.runtime, '/control/tunnel/start');
+        verifyMigrationRoute(await embeddedRequest(registry, '/status'), journal.candidateURL, current.runtime);
         const info = await control(current.runtime, '/control/info', 'GET', 3000);
         if (info.migrationCandidate !== false || `${info.publicUrl}/mcp` !== journal.candidateURL) throw new Error('Committed Main runtime endpoint mismatch.');
         return { ...current.runtime, migrationCandidate: info.migrationCandidate };

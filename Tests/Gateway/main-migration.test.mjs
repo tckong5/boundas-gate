@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Registry, secureWrite } from '../../Resources/Gateway/registry.mjs';
-import { migrateMainToShared as runMigration, readMainMigration, candidateRegistry, validateMainEndpoint } from '../../Resources/Gateway/main-migration.mjs';
+import { migrateMainToShared as runMigration, readMainMigration, candidateRegistry, validateMainEndpoint, verifyMigrationRoute } from '../../Resources/Gateway/main-migration.mjs';
 import { embeddedLocation } from '../../Resources/Tailscale/embedded.mjs';
 import { startGateway } from '../../Resources/Gateway/server.mjs';
 const migrateMainToShared = options => runMigration({ finalize: async () => ({ ...runtime, migrationCandidate: false }), ...options });
@@ -112,4 +112,55 @@ test('successful commit replaces actual candidate server with normal OAuth runti
   assert.equal(registration.status,201);
   assert.equal(JSON.parse(fs.readFileSync(path.join(registry.directory,'auth.json'))).clients.length,1);
  } finally {if(gateway)await gateway.close();}
+}));
+
+function fastTiming(budgetMs = 20) {
+ let time = 0;
+ return { budgetMs, now: () => time, sleep: async ms => { time += ms; } };
+}
+function readyResponse(url) {
+ const base = 'https://new.tail.ts.net';
+ switch (new URL(url).pathname) {
+ case '/health': return Response.json({service:'boundas-gateway',workspaceId:runtime.workspaceId,instanceID:runtime.instanceID});
+ case '/.well-known/oauth-authorization-server': return Response.json({issuer:base,authorization_endpoint:base+'/oauth/authorize',token_endpoint:base+'/oauth/token'});
+ case '/.well-known/oauth-protected-resource/mcp': return Response.json({resource:base+'/mcp',authorization_servers:[base]});
+ default: return new Response('{}',{status:401,headers:{'www-authenticate':`Bearer resource_metadata="${base}/.well-known/oauth-protected-resource/mcp"`}});
+ }
+}
+test('local route readiness requires ready state and exact Gate/instance/URL',()=>{
+ const route={gateID:runtime.workspaceId,instanceID:runtime.instanceID,publicUrl:'https://new.tail.ts.net'};
+ verifyMigrationRoute({state:'ready',routes:[route]},route.publicUrl+'/mcp',runtime);
+ for(const changed of [{state:'login',routes:[route]}, {state:'ready',routes:[{...route,gateID:'000000000000'}]}, {state:'ready',routes:[{...route,instanceID:'b'.repeat(64)}]}, {state:'ready',routes:[{...route,publicUrl:'https://old.tail.ts.net'}]}]) assert.throws(()=>verifyMigrationRoute(changed,route.publicUrl+'/mcp',runtime),/ownership mismatch/);
+});
+test('transport readiness failures then success reuse same validator/runtime',async()=>{
+ let attempts=0;const fetcher=async url=>{if(++attempts<=3)throw Object.assign(new TypeError('fetch failed'),{cause:{code:'ENOTFOUND'}});return readyResponse(url);};
+ await validateMainEndpoint('https://new.tail.ts.net/mcp',runtime,fetcher,fastTiming(10000));assert.equal(attempts,7);
+});
+test('transient 502/503/504 then success',async()=>{
+ let attempts=0;const codes=[502,503,504];
+ await validateMainEndpoint('https://new.tail.ts.net/mcp',runtime,async url=>++attempts<=3?new Response('',{status:codes[attempts-1]}):readyResponse(url),fastTiming(10000));assert.equal(attempts,7);
+});
+for(const step of ['health','discovery','resource','mcp']) test(`${step} semantic error fails without retry`,async()=>{
+ let attempts=0;let sleeps=0;
+ const paths={health:'/health',discovery:'/.well-known/oauth-authorization-server',resource:'/.well-known/oauth-protected-resource/mcp',mcp:'/mcp'};
+ await assert.rejects(validateMainEndpoint('https://new.tail.ts.net/mcp',runtime,async url=>{
+  attempts++;return new URL(url).pathname===paths[step]?Response.json({wrong:true}):readyResponse(url);
+ },{...fastTiming(),sleep:async()=>{sleeps++;}}),error=>error.validationDetail.step===step && error.validationDetail.kind==='semantic');
+ assert.equal(sleeps,0);assert.equal(attempts,['health','discovery','resource','mcp'].indexOf(step)+1);
+});
+test('readiness exhaustion preserves precommit bytes and useful journal diagnostics',()=>fixture(async registry=>{
+ const before=fs.readFileSync(path.join(registry.directory,'config.json'));let setups=0;let opens=0;
+ const validate=(url,state)=>validateMainEndpoint(url,state,async()=>{throw Object.assign(Error('fetch failed'),{cause:{code:'ECONNREFUSED'}});},fastTiming());
+ await assert.rejects(migrateMainToShared({registry,setup:async()=>{setups++;return account;},open:async()=>{opens++;return runtime;},cleanup:async()=>{},validate}),/health exhausted readiness retry/);
+ assert.deepEqual(fs.readFileSync(path.join(registry.directory,'config.json')),before);
+ assert.deepEqual(readMainMigration(registry).failureDetail,{step:'health',kind:'transient',code:'ECONNREFUSED'});assert.equal(setups,1);assert.equal(opens,1);
+}));
+test('normal runtime validation tolerates readiness delay without identity/login recreation',()=>fixture(async registry=>{
+ let setups=0;let opens=0;let finalizes=0;let normalAttempts=0;
+ await migrateMainToShared({registry,setup:async()=>{setups++;return account;},open:async()=>{opens++;return runtime;},cleanup:async()=>{},finalize:async()=>{finalizes++;return {...runtime,migrationCandidate:false};},
+ validate:(url,state)=>validateMainEndpoint(url,state,async url=>{
+  if(state.migrationCandidate===false && ++normalAttempts<=2)throw Object.assign(Error('fetch failed'),{cause:{code:'ECONNRESET'}});
+  return readyResponse(url);
+ },fastTiming(10000))});
+ assert.equal(setups,1);assert.equal(opens,1);assert.equal(finalizes,1);assert.equal(normalAttempts,6);assert.equal(readMainMigration(registry),null);
 }));

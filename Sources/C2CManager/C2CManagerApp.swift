@@ -58,81 +58,26 @@ private struct MenuBarContent: View {
     }
 
     var body: some View {
-        Text("Main Gate：\(gateway.connectionTitle)")
-        Divider()
-        Button("Main Gate…") {
+        Text("Main Gate")
+        Text(gateway.connectionState.title)
+        Button("Manage Main Gate…") {
             store.selectedID = SharedGatewayStore.selectionID
             showManager()
         }
-        Button(gateway.connectionState.button) {
-            store.selectedID = SharedGatewayStore.selectionID
-            showManager()
-            Task {
-                switch gateway.connectionState {
-                case .checking, .unknown: await gateway.refresh()
-                case .stopped, .needsRepair: await gateway.repair()
-                case .ready: gateway.copyURL(openChatGPT: true)
-                }
-            }
-        }
-        .disabled(gateway.working || gateway.visiblyChecking
-                  )
-        if gateway.statusConfirmed && (gateway.status?.running == true || gateway.status?.desiredRunning == true) {
-            if gateway.status?.running == true && gateway.status?.state != "unknown" {
-                Button("重啟共用連線") {
-                    store.selectedID = SharedGatewayStore.selectionID
-                    showManager()
-                    Task { await gateway.restart() }
-                }.disabled(gateway.working || gateway.visiblyChecking)
-            }
-            Button("停止共用連線") {
-                store.selectedID = SharedGatewayStore.selectionID
-                showManager()
-                Task { _ = await gateway.perform("stop") }
-            }.disabled(gateway.working)
-        }
         Divider()
-        Text("Side Gates：\(store.healthyConnectionCount) 個就緒")
+        Text("Side Gates")
         if store.sideGateWorkspaces.isEmpty {
-            Text("尚未加入 Side Gate")
+            Text("No Side Gates added")
         }
         ForEach(store.sideGateWorkspaces) { workspace in
-            Menu {
-                Text(workspace.path)
-                if let status = store.statuses[workspace.id] {
-                    Text(status.running == false ? "連線未開啟" : store.diagnostics[workspace.id]?.isUsable == true ? "Mac 連線已準備好" : "連線需要處理")
-                }
-                Divider()
-                Button("複製 ChatGPT 連線地址") { store.copyURL(workspace) }
-                    .disabled(store.diagnostics[workspace.id]?.isUsable != true)
-                if let pairing = store.pairingCodes[workspace.id], pairing.expiresAt > Date() {
-                    Text("配對碼：\(pairing.value)")
-                    Button("Copy Pairing Code") { store.copyPairingCode(workspace) }
-                }
-                Button("Generate New Pairing Code…") {
-                    store.selectedID = workspace.id
-                    showManager()
-                    Task { await store.generatePairingCode(workspace) }
-                }
-                .disabled(store.diagnostics[workspace.id]?.isUsable != true)
-                Button("帶我設定／修復連線…") {
-                    store.selectedID = workspace.id
-                    showManager()
-                }
-                if store.statuses[workspace.id]?.running == true {
-                    Button("停止連線") { Task { await store.stop(workspace) } }
-                }
-                Divider()
-                Button("Open Logs") { store.openLogs(workspace) }
-                Button("Open Folder") { store.openFolder(workspace) }
+            Menu(workspace.name) {
                 Button("Manage Side Gate…") {
                     store.selectedID = workspace.id
                     showManager()
                 }
-            } label: {
-                Label(workspace.name, systemImage: store.statuses[workspace.id]?.running == true ? "circle.fill" : "circle")
+                Button("Open Folder") { store.openFolder(workspace) }
+                Button("Open Logs") { store.openLogs(workspace) }
             }
-            .disabled(store.busy[workspace.id] != nil)
         }
         Divider()
         Button("Add Folders…", systemImage: "plus") { store.addFolder() }
@@ -140,21 +85,12 @@ private struct MenuBarContent: View {
             showManager()
             store.showingAddPath = true
         }
-        Button("Open All Side Gates") {
-            Task {
-                await store.startAll()
-                if let workspace = store.workspaces.first(where: { store.pairingCodes[$0.id] != nil }) {
-                    store.selectedID = workspace.id
-                    showManager()
-                }
-            }
-        }
+        Button("Open All Side Gates") { Task { await store.startAll() } }
             .disabled(store.sideGateWorkspaces.isEmpty)
         Button("Close All Side Gates") { Task { await store.stopAll() } }
             .disabled(store.runningCount == 0)
         Divider()
         Button("Manage Folders…") { showManager() }
-        Button("Open ChatGPT") { store.openChatGPT() }
         Button("Quit Boundas Gate") { NSApp.terminate(nil) }
     }
 
@@ -312,7 +248,7 @@ private struct ManagerWindow: View {
                         return .handled
                     }
                     .overlay {
-                        if store.sideGateWorkspaces.isEmpty { SidebarEmptyFolders() }
+                        if store.sideGateWorkspaces.isEmpty { SidebarEmptyFolders(isSideGate: true) }
                     }
                 }
             }
@@ -328,8 +264,12 @@ private struct ManagerWindow: View {
                 SharedGatewayView(store: store, gateway: store.gateway, selected: $sharedSelection)
             } else if let workspace = store.sideGateWorkspaces.first(where: { $0.id == store.selectedID }) {
                 WorkspaceDetail(store: store, workspace: workspace).id(workspace.id)
+            } else if store.sideGateWorkspaces.isEmpty {
+                ContentUnavailableView("Add your first Side Gate", systemImage: "folder",
+                                       description: Text("Choose a Folder in Main Gate and add it to Side Gates."))
             } else {
-                ContentUnavailableView("選擇一個 Folder", systemImage: "folder", description: Text("加入任何 folder，然後管理佢嘅 Side Gate。"))
+                ContentUnavailableView("Select a Side Gate", systemImage: "folder",
+                                       description: Text("Choose a Folder to manage its Side Gate."))
             }
         }
         .alert("Boundas Gate", isPresented: Binding(
@@ -548,12 +488,14 @@ private struct SidebarSelectionAppearance: NSViewRepresentable {
 }
 
 private struct SidebarEmptyFolders: View {
+    var isSideGate = false
+
     var body: some View {
         GeometryReader { geometry in
             VStack(spacing: 6) {
-                Text("Add your first Folder")
+                Text(isSideGate ? "Add your first Side Gate" : "Add your first Folder")
                     .font(.system(size: 13, weight: .medium))
-                Text("Choose a folder to share through Main Gate.")
+                Text(isSideGate ? "Choose a Folder in Main Gate and add it to Side Gates." : "Choose a folder to share through Main Gate.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -610,7 +552,7 @@ private struct AddPathSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Add Folder by Path").font(.title2.bold())
-            Text("貼上 folder 路徑；只有你加入嘅 folder 會成為 C2C workspace。")
+            Text("Paste a Folder path. Only Folders you add are available to Boundas Gate.")
                 .foregroundStyle(.secondary)
             TextField("~/Projects/my-project", text: $path)
                 .font(.system(.body, design: .monospaced))

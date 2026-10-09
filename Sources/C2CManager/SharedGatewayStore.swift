@@ -296,6 +296,12 @@ final class SharedGatewayStore: ObservableObject {
             }
     }
 
+    func suspendForAppQuit() {
+        observationEnabled = false
+        revision += 1
+        wakeObserver = nil
+    }
+
     /// Retire this Side owner's observations before the backend decommission.
     /// Pending responses are ignored and this instance cannot restart/pair again.
     func suspendForDecommission() {

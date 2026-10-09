@@ -1,5 +1,29 @@
 import Foundation
 
+/// The lock protects registry membership only, never Process lifecycle work.
+final class ActiveCommandRegistry: @unchecked Sendable {
+    private let lock = NSLock()
+    private var processes: [ObjectIdentifier: Process] = [:]
+
+    func register(_ process: Process) {
+        lock.lock()
+        defer { lock.unlock() }
+        processes[ObjectIdentifier(process)] = process
+    }
+
+    func unregister(_ process: Process) {
+        lock.lock()
+        defer { lock.unlock() }
+        processes[ObjectIdentifier(process)] = nil
+    }
+
+    func snapshot() -> [Process] {
+        lock.lock()
+        defer { lock.unlock() }
+        return Array(processes.values)
+    }
+}
+
 struct CommandResult {
     let code: Int32
     let output: String
@@ -35,6 +59,7 @@ protocol GatewayClient {
 struct C2CClient: SideGateClient, GatewayClient {
     private let cliPath = RuntimePaths.current.cli
     private static let resolvedNodePath = findSupportedNode()
+    private static let activeCommands = ActiveCommandRegistry()
 
     private static func findSupportedNode() -> String? {
         if let bundled = RuntimePaths.current.bundledNode { return bundled }
@@ -67,7 +92,7 @@ struct C2CClient: SideGateClient, GatewayClient {
         return try RuntimePaths.current.resource(name, developerRoot: sourceRoot).path
     }
 
-    func run(_ arguments: [String], entry: String? = nil) async throws -> CommandResult {
+    func run(_ arguments: [String], entry: String? = nil, timeout: TimeInterval? = nil) async throws -> CommandResult {
         if let entry, !FileManager.default.fileExists(atPath: entry) { throw RuntimeResourceError.missing(URL(fileURLWithPath: entry).lastPathComponent) }
         guard FileManager.default.fileExists(atPath: cliPath) else { throw C2CClientError.missingCLI }
         guard let nodePath = Self.resolvedNodePath else { throw C2CClientError.missingNode }
@@ -92,11 +117,27 @@ struct C2CClient: SideGateClient, GatewayClient {
         let outputTask = Task.detached { stdout.fileHandleForReading.readDataToEndOfFile() }
         let errorTask = Task.detached { stderr.fileHandleForReading.readDataToEndOfFile() }
 
+        Self.activeCommands.register(process)
+        defer { Self.activeCommands.unregister(process) }
+        var timeoutWork: DispatchWorkItem?
+        defer { timeoutWork?.cancel() }
         let exitCode: Int32 = try await withCheckedThrowingContinuation { continuation in
             process.terminationHandler = { terminated in
                 continuation.resume(returning: terminated.terminationStatus)
             }
-            do { try process.run() }
+            do {
+                try process.run()
+                if let timeout {
+                    let work = DispatchWorkItem {
+                        if process.isRunning { process.terminate() }
+                        DispatchQueue.global().asyncAfter(deadline: .now() + 1) {
+                            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+                        }
+                    }
+                    timeoutWork = work
+                    DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: work)
+                }
+            }
             catch {
                 try? stdout.fileHandleForWriting.close(); try? stderr.fileHandleForWriting.close()
                 continuation.resume(throwing: error)
@@ -105,6 +146,26 @@ struct C2CClient: SideGateClient, GatewayClient {
         let output = String(data: await outputTask.value, encoding: .utf8) ?? ""
         let error = String(data: await errorTask.value, encoding: .utf8) ?? ""
         return CommandResult(code: exitCode, output: output.trimmingCharacters(in: .whitespacesAndNewlines), error: error.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// Cancel only command Process objects launched by this app/profile.
+    /// Detached Gate/helper children are shut down separately with ownership checks.
+    static func cancelActiveCommands() async {
+        let processes = activeCommands.snapshot()
+        for process in processes where process.isRunning { process.terminate() }
+        if !processes.isEmpty { try? await Task.sleep(for: .seconds(1)) }
+        for process in processes where process.isRunning { kill(process.processIdentifier, SIGKILL) }
+    }
+
+    func shutdownApplication() async -> AppShutdownReport {
+        do {
+            let result = try await run([], entry: resource("Gateway/app-shutdown.mjs"), timeout: 35)
+            guard let data = result.output.data(using: .utf8),
+                  let report = try? JSONDecoder().decode(AppShutdownReport.self, from: data) else {
+                return .failed("Shutdown command did not acknowledge completion (exit \(result.code)). \(result.error.suffix(500))")
+            }
+            return report
+        } catch { return .failed(error.localizedDescription) }
     }
 
     func gateway(_ action: String, input: Data? = nil, sourceID: String? = nil) async throws -> Data {

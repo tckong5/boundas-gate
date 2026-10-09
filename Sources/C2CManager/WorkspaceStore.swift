@@ -29,6 +29,7 @@ final class WorkspaceStore: ObservableObject {
     @Published var alertMessage: String?
     @Published var showingAddPath = false
 
+    private var quitting = false
     private let client: any SideGateClient
     private(set) var sideGateConnections: [UUID: SharedGatewayStore] = [:]
     private var sideGateSubscriptions: [UUID: AnyCancellable] = [:]
@@ -98,10 +99,18 @@ final class WorkspaceStore: ObservableObject {
         }
     }
 
+    /// Freeze observations/recovery only; keep all persistent user intent intact.
+    func suspendForAppQuit() {
+        quitting = true
+        gateway.suspendForAppQuit()
+        for connection in sideGateConnections.values { connection.suspendForAppQuit() }
+    }
+
     // The same owner is used by background observation, sidebar and detail.
     func sideGateway(for workspace: WorkspaceRecord) -> SharedGatewayStore {
         if let existing = sideGateConnections[workspace.id] { return existing }
         let connection = makeSideGateway(workspace)
+        if quitting { connection.suspendForAppQuit() }
         guard let current = workspaces.first(where: { $0.id == workspace.id && $0.belongsToSideGates }) else {
             // An old view/async caller must not recreate a removed cache entry.
             connection.suspendForDecommission()
@@ -291,12 +300,14 @@ final class WorkspaceStore: ObservableObject {
 
     // One polling pass; independent of the currently selected Gate.
     func refreshAll() async {
+        guard !quitting else { return }
         for workspace in sideGateWorkspaces where workspace.canOperateSideGate && busy[workspace.id] == nil {
             await observeSideGate(workspace)
         }
     }
 
     private func performSideGate(_ action: String, workspace: WorkspaceRecord) async {
+        guard !quitting else { return }
         guard let current = operableSideGate(workspace), busy[current.id] == nil else { return }
         let connection = sideGateway(for: current)
         guard !connection.working, !connection.reconnecting else { return }

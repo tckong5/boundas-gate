@@ -5,25 +5,32 @@ import SwiftUI
 struct C2CManagerApp: App {
     @NSApplicationDelegateAdaptor(ManagerAppDelegate.self) private var appDelegate
     @StateObject private var session = ManagerSession()
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
         Window(AppDataPaths.current.windowTitle, id: "manager") {
             if let store = session.store {
                 ManagerWindow(store: store, appDelegate: appDelegate)
                     .frame(minWidth: 760, minHeight: 500)
+                    .onAppear { appDelegate.quitCoordinator = session.quitCoordinator }
             } else {
                 VStack(alignment: .leading, spacing: 16) {
                     Text("Unable to Open Boundas Gate").font(.title2.bold())
                     Text(session.error ?? "Your existing data has been preserved.")
                     Button("Quit Boundas Gate") { NSApp.terminate(nil) }
                 }.padding(32).frame(width: 520)
+                .onAppear { appDelegate.quitCoordinator = session.quitCoordinator }
             }
         }
         .defaultSize(width: 900, height: 590)
 
         MenuBarExtra {
             if let store = session.store { MenuBarContent(store: store) }
-            else { Text("Boundas Gate needs attention") }
+            else {
+                Text("Boundas Gate needs attention")
+                Button("Show Boundas Gate") { AppWindowLifecycle.show(restore: { openWindow(id: $0) }, activate: { NSApp.activate(ignoringOtherApps: true) }) }
+                Button("Quit Boundas Gate") { NSApp.terminate(nil) }
+            }
         } label: {
             Image(nsImage: MenuBarIcon.image)
                 .renderingMode(.original)
@@ -34,9 +41,21 @@ struct C2CManagerApp: App {
 }
 
 @MainActor
+private func makeQuitCoordinator(freeze: @escaping () -> Void) -> AppQuitCoordinator {
+    AppQuitCoordinator(freeze: freeze, shutdown: {
+        await C2CClient.cancelActiveCommands()
+        return await C2CClient().shutdownApplication()
+    }, record: { report in
+        let detail = report.failures.map { "\($0.component): \($0.message)" }.joined(separator: "\n")
+        GatewayDiagnosticsLog.record(.init(code: report.ok ? 0 : 1, output: "", error: detail), action: "quit-app")
+    }, finish: { NSApp.reply(toApplicationShouldTerminate: true) })
+}
+
+@MainActor
 private final class ManagerSession: ObservableObject {
     let store: WorkspaceStore?
     let error: String?
+    lazy var quitCoordinator = makeQuitCoordinator { [weak self] in self?.store?.suspendForAppQuit() }
     init() {
         do {
             try AppDataPaths.current.prepare()
@@ -52,6 +71,7 @@ private final class ManagerSession: ObservableObject {
 @MainActor
 private final class ManagerAppDelegate: NSObject, NSApplicationDelegate {
     var openManagerWindow: (() -> Void)?
+    var quitCoordinator = makeQuitCoordinator(freeze: {})
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
@@ -61,7 +81,12 @@ private final class ManagerAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        false
+        AppWindowLifecycle.terminateAfterLastWindowClosed
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        quitCoordinator.requestQuit()
+        return .terminateLater
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -83,6 +108,8 @@ private struct MenuBarContent: View {
     }
 
     var body: some View {
+        Button("Show Boundas Gate") { showManager() }
+        Divider()
         Text("Main Gate")
         Text(gateway.connectionState.title)
         Button("Manage Main Gate…") {
@@ -120,8 +147,7 @@ private struct MenuBarContent: View {
     }
 
     private func showManager() {
-        openWindow(id: "manager")
-        NSApp.activate(ignoringOtherApps: true)
+        AppWindowLifecycle.show(restore: { openWindow(id: $0) }, activate: { NSApp.activate(ignoringOtherApps: true) })
     }
 }
 

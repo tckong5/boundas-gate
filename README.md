@@ -68,6 +68,8 @@ App 內置 Node.js、C2C backend、cloudflared 同 Tailscale userspace runtime�
 
 Main Gate external → Shared Secure Access 嘅明確 migration、production MCP read 同重啟 identity continuity 已驗收。既有 external endpoint 仍只會由用戶明確批准 migration，唔會靜默更換。
 
+Current main 亦已支援 Folder rename／move 後保留原有 Folder identity；呢項係 v1.2.0 發布後加入，v1.2.0 release 本身未包含。
+
 Sparkle 2.10 更新整合已完成，menu bar 提供 **Check for Updates…** 同原生 **About Boundas Gate…**。Update archive 必須通過 EdDSA 驗證；私鑰只留喺 Login Keychain。目前正式 appcast URL 尚未設定，未設定 feed 嘅 build 唔會啟動更新檢查。發布設定及隔離測試方法見 [UPDATES.md](docs/UPDATES.md)。
 
 ## Passcode Protection
@@ -101,7 +103,7 @@ App 會保留 existing Gate identity、OAuth、Tailscale state 同 Folder record
 ./scripts/build-new-user-app.sh
 ```
 
-release identity 集中喺 [`scripts/release-config.sh`](scripts/release-config.sh)：product name、bundle ID、版本同 production build number 由同一份設定提供。現行版本係 **1.2.0**；production build number 係 **7**。
+release identity 集中喺 [`scripts/release-config.sh`](scripts/release-config.sh)：product name、bundle ID、版本同 production build number 由同一份設定提供。現行公開 release 係 **1.2.0**；production build number 係 **7**。套件已發布到 [GitHub Releases](https://github.com/tckong5/boundas-gate/releases/tag/v1.2.0)，使用 ad-hoc signing、未 Apple notarized；macOS Gatekeeper 可能需要手動選擇 Open Anyway。Developer ID／notarization 係可選嘅未來 release path，並非目前安裝要求。
 
 正式 Developer ID path 必須明確要求簽名及公證 credentials，唔會靜默退回 ad hoc：
 

@@ -1,6 +1,9 @@
-# Boundas Gate 1.2.0（production build 7）
+# Boundas Gate 1.2.0（production build 7）— 已發布
 
-目前係未發布嘅 open-source public beta candidate，**ad-hoc signed、未 Apple notarized**。產品版本維持 1.2.0，production build number 係 7。
+v1.2.0 係已發布嘅 open-source public beta，GitHub Release：
+[Boundas Gate v1.2.0](https://github.com/tckong5/boundas-gate/releases/tag/v1.2.0)。
+此版本係 **ad-hoc signed、未 Apple notarized**；macOS Gatekeeper 可能需要用戶手動選擇 Open Anyway。
+產品版本係 1.2.0，production build number 係 7。
 
 ## 今輪完成
 
@@ -18,6 +21,11 @@
 - Root `LICENSE` 加入 Boundas Gate MIT License；Runtime 內第三方 license 保持分開。
 - Local/test build 同 public Developer ID / notarization path 分開；public mode 缺少 credentials 時會直接 fail，唔會退回 ad hoc signing。
 - Node/V8 hardened-runtime entitlement 已經以實測收窄至 `com.apple.security.cs.allow-jit`；冇加入 broad executable-memory 或其他額外 entitlement。
+
+## 發布後 main 嘅未發布變更
+
+- Folder relocation 已加入 main（commit `8bc7f59`）：Folder rename／move 可以保留原有 UUID、c2cID、Gate、OAuth 同 passcode policy。呢項不屬於 v1.2.0 release asset。
+- Local Network permission investigation 暫時冇需要修改 Boundas code；舊 Tailscale Network Extension 係主要懷疑來源，但停用後重開機驗收仍待完成，未宣稱根因已 conclusively verified。
 
 ## Release identity
 
@@ -40,7 +48,7 @@
 | Gateway／Tailscale Node suite | PASS，101 tests |
 | Go tunnel tests | PASS，`go test -race ./...` |
 | Local/test ad hoc signing path | PASS；bundle / ZIP extracted app `codesign --verify --deep --strict` 通過 |
-| Developer ID signing path | 已實作；需要 `BOUNDAS_CODESIGN_IDENTITY` |
+| Developer ID signing path | 已實作但刻意暫緩；需要 `BOUNDAS_CODESIGN_IDENTITY` |
 | Notarization / stapling / Gatekeeper | 未執行；需要 `BOUNDAS_NOTARY_PROFILE` 及 Developer ID credentials |
 | Portable release smoke test | PASS；isolated bundle、embedded userspace core、login URL、retry identity 全部通過 |
 
@@ -55,7 +63,7 @@ Production migration、production MCP read 同 quit／reopen identity continuity
 ./scripts/package-release.sh
 ```
 
-選用 Developer ID／notarization mode 時必須提供以下設定；目前 ad-hoc public beta candidate 未使用呢個 mode：
+選用 Developer ID／notarization mode 時必須提供以下設定；目前已發布嘅 ad-hoc public beta 未使用呢個 mode：
 
 ```sh
 BOUNDAS_BUILD_MODE=public
@@ -84,4 +92,4 @@ New User Test 會留喺：
 
 ## 下一步
 
-完成 repo privacy／artwork 授權確認，設定正式 appcast URL，再另行批准 GitHub repository／release 發布。Production migration 已完成，唔需要重做。Developer ID／notarization 留待另一次明確批准嘅 release 工作。
+後續可選工作係設定正式 appcast URL，另行產生及發布 Sparkle signed updates；目前 feed 未啟用。Production migration、production MCP read、Quit／reopen 同 Folder relocation acceptance 已完成，唔需要重做。Developer ID／notarization 因未加入 Apple Developer Program 而刻意暫緩；未有 v1.2.1 發布或日期。

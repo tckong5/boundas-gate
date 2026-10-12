@@ -44,13 +44,13 @@
 
 發佈方向已選定：**Public GitHub repository，GitHub-first**。
 
-- [ ] 整理 repo、README、設定教學、架構說明同授權文件。
+- [x] 整理 repo、README、設定教學、架構說明同授權文件。
 - [x] 1.2.0 將已驗證 C2C 0.1.3 build 同完整 runtime dependencies 打包，記錄版本及來源摘要，保留原始授權文件。
 - [x] 內置 Node.js／cloudflared／C2C；bundle 缺失時提供重新安裝提示，唔依賴試用者開發環境。
-- [ ] 提供乾淨安裝流程，唔依賴開發者本機環境。
-- [ ] GitHub Releases 提供 `.app.zip`／DMG、版本資料同安裝指引。
+- [x] 提供乾淨安裝流程，唔依賴開發者本機環境。
+- [x] GitHub Releases 提供 `.app.zip`／DMG、版本資料同安裝指引。
 - [x] 試用包標示 Apple Silicon、macOS 14+；其他架構尚未提供。
-- [ ] 建立自動 build／release 流程，規劃 Developer ID 簽署同 notarization。
+- [ ] 建立自動 build／release 流程；目前以既有手動 ad-hoc release path 發布。
 - [ ] 以全新用戶環境驗證 Add Workspace → Start → Pair → MCP 存取。
 
 公開範圍：App source、文件、build script 同發佈套件。workspace config、OAuth tokens、pairing codes、logs、私人 project 同簽署憑證留喺用戶本機。
@@ -66,11 +66,16 @@
 - [x] 提供可由 UI 明確確認嘅 Main Gate external → Shared Secure Access migration；production migration、MCP read 同重啟 identity continuity 已驗收，唔會自動轉換。
 - [x] 產生本機 DMG／ZIP、安裝說明及 SHA256SUMS；乾淨 staging 解壓後簽署驗證通過。
 - [x] 1.2.0 bundle runtime 重啟現有共用 Gateway 後，原有 Plugin 仍可列出已分享嘅 Folders 同讀取檔案，URL／OAuth 保留。
-- [ ] 將 DMG／ZIP 同版本說明發佈到 GitHub Releases。
-- [ ] Developer ID 簽署、notarization 同乾淨 Mac 首次開啟驗收。
+- [x] 將 DMG／ZIP 同版本說明發佈到 GitHub Releases（v1.2.0 已發布）。
+- [ ] 乾淨 Mac 首次開啟驗收；Developer ID 簽署及 notarization 刻意暫緩，唔係 release blocker。
 - [x] Sparkle 2.10 整合、EdDSA 驗證、原生更新／About UI、隔離 local tests 同簽署 appcast tooling。
 - [ ] 確定正式 GitHub／HTTPS appcast URL，產生 signed updates 並另行批准發布；未設定 feed 嘅 build 保持停用。
 - [x] Window close 保留 Gates；明確 menu bar Quit 停止 verified runtimes／helper，同時保留 desiredRunning、identity、OAuth 同 Folder state。
+- [x] Folder relocation：以穩定 filesystem identity 保留 Folder UUID、c2cID、Gate、OAuth 同 passcode policy；production relocation acceptance 已通過。此項係 v1.2.0 發布後加入。
+
+### 明確暫緩
+
+- Developer ID signing、Apple notarization 同 stapling：因未加入 Apple Developer Program，刻意不做；繼續支援 ad-hoc GitHub Releases，並保留 Gatekeeper 安裝指引。
 
 ### V1.2：日常使用同連線可靠性
 

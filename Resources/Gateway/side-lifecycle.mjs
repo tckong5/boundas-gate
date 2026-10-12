@@ -4,7 +4,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { pathToFileURL, fileURLToPath } from 'node:url';
-import { Registry, secureWrite } from './registry.mjs';
+import { Registry, secureWrite, fileIdentity } from './registry.mjs';
 import { retireRoutes, withLock } from '../Tailscale/provider.mjs';
 import { SideRegistry } from './side-registry.mjs';
 import { startGateway, loadBackend } from './server.mjs';
@@ -18,7 +18,8 @@ import { migrateSideToShared } from './side-migration.mjs';
 export function sideRecord(registry, sourceID, removing = false) {
   const record = registry.addedFolders().find(item => item.id?.toLowerCase() === sourceID?.toLowerCase());
   if (!record || record.sideGateAdded !== true || (!removing && record.sideGateRemovalState)) throw new Error('Side Gate 未啟用，或者正在移除。');
-  if (!/^[a-f0-9]{12}$/.test(record.c2cID) || !path.isAbsolute(record.path)) throw new Error('Side Gate 記錄無效。');
+  if (!/^[a-f0-9]{12}$/.test(record.c2cID) || !path.isAbsolute(record.path)
+      || record.folderFileIdentity && fileIdentity(record.path) !== record.folderFileIdentity) throw new Error('Side Gate 記錄無效。');
   return record;
 }
 export function sideAccessAllowed(registry, sourceID) {
@@ -87,7 +88,7 @@ async function main() {
     output({ ok: true }); return;
   }
   const workspace = new Workspace(record.path);
-  if (workspace.id !== record.c2cID || workspace.root !== record.path) throw new Error('Folder 位置已改變，請重新加入。');
+  if (workspace.root !== record.path || record.folderFileIdentity && fileIdentity(workspace.root) !== record.folderFileIdentity) throw new Error('Folder 位置已改變，請喺 App 重新定位。');
   const sideRegistry = new SideRegistry(registry, sourceID, path.join(stateDir, 'side-gates', record.c2cID));
   await withLock(registry.directory, () => sideRegistry.ensure());
   if (fs.existsSync(path.join(sideRegistry.directory, 'endpoint-migration.json')) && !['status', 'tunnel-status', 'migrate-shared', 'daemon'].includes(action)) throw new Error('Side Gate endpoint migration needs Retry before reconnecting.');

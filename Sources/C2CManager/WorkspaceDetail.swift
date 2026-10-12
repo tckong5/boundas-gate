@@ -41,6 +41,7 @@ struct WorkspaceDetail: View {
                     FolderPasscodeButton(gateway: gateway, workspace: workspace, configurationChanged: false)
                     Menu {
                         Button("Rename") { beginRename() }
+                        Button("Locate Folder…") { store.locateFolder(workspace) }
                         Button("Recheck") { Task { await gateway.refresh() } }
                         Button("Advanced…") { showAdvanced = true }
                         Divider()
@@ -50,8 +51,9 @@ struct WorkspaceDetail: View {
                     .disabled(working)
                 }
                 .contextMenu { Button("Rename") { beginRename() } }
-                if !FileManager.default.fileExists(atPath: workspace.path) {
-                    Text("Folder is unavailable on this Mac.").font(.callout).foregroundStyle(.orange)
+                if workspace.needsFolderLocation {
+                    Text("Folder location needs attention. Use Locate Folder… to reconnect it.")
+                        .font(.callout).foregroundStyle(.orange)
                 }
                 if let removal = workspace.sideGateRemovalState {
                     VStack(alignment: .leading, spacing: 8) {

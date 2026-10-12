@@ -204,4 +204,143 @@ final class RobustnessTests: XCTestCase {
         await store.refreshAll()
         XCTAssertEqual(store.workspaces.first, persistedMetadata)
     }
+
+    func testFolderBookmarkPreservesIdentityWhenFolderIsRenamed() throws {
+        let root = try temporaryRoot(); defer { try? FileManager.default.removeItem(at: root) }
+        let old = root.appendingPathComponent("Before")
+        let renamed = root.appendingPathComponent("After")
+        try FileManager.default.createDirectory(at: old, withIntermediateDirectories: true)
+        let file = root.appendingPathComponent("workspaces.json")
+        let store = try WorkspaceStore(configURL: file, automaticallyRefresh: false)
+        XCTAssertTrue(store.addPath(old.path))
+        let original = try XCTUnwrap(store.workspaces.first)
+        XCTAssertNotNil(original.folderBookmark)
+        try FileManager.default.moveItem(at: old, to: renamed)
+
+        let restored = try WorkspaceStore(configURL: file, automaticallyRefresh: false)
+        let moved = try XCTUnwrap(restored.workspaces.first)
+        XCTAssertEqual(moved.id, original.id)
+        XCTAssertEqual(moved.c2cID, original.c2cID)
+        XCTAssertEqual(moved.path, WorkspaceStore.canonicalPath(renamed.path))
+        XCTAssertTrue(moved.belongsToMainGate)
+    }
+
+    func testFolderBookmarkPreservesIdentityWhenFolderIsMoved() throws {
+        let root = try temporaryRoot(); defer { try? FileManager.default.removeItem(at: root) }
+        let oldParent = root.appendingPathComponent("Old")
+        let newParent = root.appendingPathComponent("New")
+        let old = oldParent.appendingPathComponent("Folder")
+        let movedPath = newParent.appendingPathComponent("Folder")
+        try FileManager.default.createDirectory(at: old, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: newParent, withIntermediateDirectories: true)
+        let file = root.appendingPathComponent("workspaces.json")
+        let store = try WorkspaceStore(configURL: file, automaticallyRefresh: false)
+        XCTAssertTrue(store.addPath(old.path))
+        let original = try XCTUnwrap(store.workspaces.first)
+        try FileManager.default.moveItem(at: old, to: movedPath)
+
+        let restored = try WorkspaceStore(configURL: file, automaticallyRefresh: false)
+        let moved = try XCTUnwrap(restored.workspaces.first)
+        XCTAssertEqual(moved.id, original.id)
+        XCTAssertEqual(moved.c2cID, original.c2cID)
+        XCTAssertEqual(moved.path, WorkspaceStore.canonicalPath(movedPath.path))
+    }
+
+    func testMissingFolderRemainsUnresolvedUntilLocate() throws {
+        let root = try temporaryRoot(); defer { try? FileManager.default.removeItem(at: root) }
+        let folder = root.appendingPathComponent("Missing")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let file = root.appendingPathComponent("workspaces.json")
+        let store = try WorkspaceStore(configURL: file, automaticallyRefresh: false)
+        XCTAssertTrue(store.addPath(folder.path))
+        let originalPath = try XCTUnwrap(store.workspaces.first?.path)
+        try FileManager.default.removeItem(at: folder)
+        let restored = try WorkspaceStore(configURL: file, automaticallyRefresh: false)
+        XCTAssertEqual(restored.workspaces.first?.path, originalPath)
+        XCTAssertEqual(restored.workspaces.first?.c2cID, store.workspaces.first?.c2cID)
+    }
+
+    func testReplacementAtOldPathFailsClosed() throws {
+        let root = try temporaryRoot(); defer { try? FileManager.default.removeItem(at: root) }
+        let old = root.appendingPathComponent("Folder")
+        let moved = root.appendingPathComponent("Moved")
+        try FileManager.default.createDirectory(at: old, withIntermediateDirectories: true)
+        let file = root.appendingPathComponent("workspaces.json")
+        let store = try WorkspaceStore(configURL: file, automaticallyRefresh: false)
+        XCTAssertTrue(store.addPath(old.path))
+        try FileManager.default.moveItem(at: old, to: moved)
+        try FileManager.default.createDirectory(at: old, withIntermediateDirectories: true)
+        let restored = try WorkspaceStore(configURL: file, automaticallyRefresh: false)
+        XCTAssertTrue(try XCTUnwrap(restored.workspaces.first).needsFolderLocation)
+    }
+
+    func testLegacyRecordGainsStableReferenceWithoutChangingIdentity() throws {
+        let root = try temporaryRoot(); defer { try? FileManager.default.removeItem(at: root) }
+        let folder = root.appendingPathComponent("Legacy")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let file = root.appendingPathComponent("workspaces.json")
+        let legacy = record(path: folder.path)
+        try JSONEncoder().encode([legacy]).write(to: file)
+        let restored = try WorkspaceStore(configURL: file, automaticallyRefresh: false)
+        let value = try XCTUnwrap(restored.workspaces.first)
+        XCTAssertEqual(value.id, legacy.id)
+        XCTAssertEqual(value.c2cID, legacy.c2cID)
+        XCTAssertNotNil(value.folderBookmark)
+        XCTAssertNotNil(value.folderFileIdentity)
+    }
+
+    func testMainAndSideMembershipRemainUnchangedAfterRelocation() throws {
+        let root = try temporaryRoot(); defer { try? FileManager.default.removeItem(at: root) }
+        let old = root.appendingPathComponent("Folder")
+        let moved = root.appendingPathComponent("Moved")
+        try FileManager.default.createDirectory(at: old, withIntermediateDirectories: true)
+        let file = root.appendingPathComponent("workspaces.json")
+        let store = try WorkspaceStore(configURL: file, automaticallyRefresh: false)
+        XCTAssertTrue(store.addPath(old.path))
+        let original = try XCTUnwrap(store.workspaces.first)
+        XCTAssertTrue(store.addToSideGates(original))
+        try FileManager.default.moveItem(at: old, to: moved)
+
+        let restored = try WorkspaceStore(configURL: file, automaticallyRefresh: false)
+        let value = try XCTUnwrap(restored.workspaces.first)
+        XCTAssertEqual(value.id, original.id)
+        XCTAssertEqual(value.c2cID, original.c2cID)
+        XCTAssertTrue(value.belongsToMainGate)
+        XCTAssertTrue(value.belongsToSideGates)
+        XCTAssertEqual(value.path, WorkspaceStore.canonicalPath(moved.path))
+    }
+
+    func testLocateFolderWithMatchingFileIdentityIsAllowed() throws {
+        let root = try temporaryRoot(); defer { try? FileManager.default.removeItem(at: root) }
+        let original = root.appendingPathComponent("Original")
+        let moved = root.appendingPathComponent("Moved")
+        try FileManager.default.createDirectory(at: original, withIntermediateDirectories: true)
+        try FileManager.default.moveItem(at: original, to: moved)
+        let identity = try XCTUnwrap(WorkspaceStore.fileIdentity(moved.path))
+        XCTAssertNil(WorkspaceStore.relocationValidationError(originalPath: original.path,
+                                                              bookmark: nil,
+                                                              storedFileIdentity: identity,
+                                                              selectedPath: moved.path))
+    }
+
+    func testLocateFolderWithMismatchingFileIdentityIsRejected() throws {
+        let root = try temporaryRoot(); defer { try? FileManager.default.removeItem(at: root) }
+        let selected = root.appendingPathComponent("Selected")
+        try FileManager.default.createDirectory(at: selected, withIntermediateDirectories: true)
+        XCTAssertNotNil(WorkspaceStore.relocationValidationError(originalPath: root.appendingPathComponent("Missing").path,
+                                                                  bookmark: nil,
+                                                                  storedFileIdentity: "1:2",
+                                                                  selectedPath: selected.path))
+    }
+
+    func testLegacyMissingFolderWithoutStableReferenceIsRejected() throws {
+        let root = try temporaryRoot(); defer { try? FileManager.default.removeItem(at: root) }
+        let selected = root.appendingPathComponent("Selected")
+        try FileManager.default.createDirectory(at: selected, withIntermediateDirectories: true)
+        let error = WorkspaceStore.relocationValidationError(originalPath: root.appendingPathComponent("Missing").path,
+                                                             bookmark: nil,
+                                                             storedFileIdentity: nil,
+                                                             selectedPath: selected.path)
+        XCTAssertEqual(error, "未能確認原本 Folder 身份；請先移除，再以新 Folder 加入。")
+    }
 }

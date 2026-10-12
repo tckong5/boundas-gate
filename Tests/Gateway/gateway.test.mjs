@@ -78,6 +78,56 @@ test('registry requires explicitly added folders and preserves the gateway ID', 
     assert.equal(fs.statSync(path.join(f.registry.directory, 'config.json')).mode & 0o777, 0o600);
   } finally { f.clean(); }
 });
+test('registry relocation preserves c2cID and epoch for the same source Folder', () => {
+  const f = fixture();
+  try {
+    const first = f.select(0);
+    const movedPath = path.join(f.directory, 'Moved');
+    fs.renameSync(f.roots[0].path, movedPath);
+    const canonicalMovedPath = fs.realpathSync.native(movedPath);
+    secureWrite(f.allowlistFile, [{ ...f.roots[0], path: canonicalMovedPath }, f.roots[1], f.roots[2]]);
+    const relocated = f.select(0);
+    assert.equal(relocated.id, first.id);
+    assert.equal(relocated.roots.find(root => root.id === f.roots[0].c2cID).epoch,
+      first.roots.find(root => root.id === f.roots[0].c2cID).epoch);
+    assert.equal(relocated.roots.find(root => root.id === f.roots[0].c2cID).path, canonicalMovedPath);
+  } finally { f.clean(); }
+});
+test('registry rejects a path change to a different filesystem object without preserving policy', () => {
+  const f = fixture();
+  try {
+    const first = f.select(0);
+    const replacement = path.join(f.directory, 'Replacement');
+    fs.mkdirSync(replacement);
+    secureWrite(f.allowlistFile, [{ ...f.roots[0], path: fs.realpathSync.native(replacement) }, f.roots[1], f.roots[2]]);
+    assert.throws(() => f.select(0), /身份已改變/);
+    const current = f.registry.read().roots.find(root => root.id === f.roots[0].c2cID);
+    assert.equal(current.epoch, first.roots[0].epoch);
+    assert.equal(current.path, first.roots[0].path);
+  } finally { f.clean(); }
+});
+test('legacy registry root bootstraps file identity only at its unchanged path', () => {
+  const f = fixture();
+  try {
+    const first = f.select(0);
+    const configFile = path.join(f.registry.directory, 'config.json');
+    const legacy = f.registry.read();
+    delete legacy.roots[0].fileIdentity;
+    secureWrite(configFile, legacy);
+    const bootstrapped = f.select(0);
+    const root = bootstrapped.roots.find(item => item.id === f.roots[0].c2cID);
+    assert.equal(root.epoch, first.roots[0].epoch);
+    assert.equal(root.path, first.roots[0].path);
+    assert.match(root.fileIdentity, /^\d+:\d+$/);
+  } finally { f.clean(); }
+});
+test('registry rejects a replaced Folder when a stable file identity is present', () => {
+  const f = fixture();
+  try {
+    secureWrite(f.allowlistFile, [{ ...f.roots[0], folderFileIdentity: '1:2' }, f.roots[1], f.roots[2]]);
+    assert.throws(() => f.select(0), /身份未能確認/);
+  } finally { f.clean(); }
+});
 test('active registry reads the Folder allowlist once per operation', () => {
   const f = fixture(); f.select(0, 1, 2);
   try {

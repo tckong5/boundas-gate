@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { secureWrite } from './registry.mjs';
+import { secureWrite, fileIdentity } from './registry.mjs';
 
 // One Side Gate, one Folder; sharing membership and policy remain independent.
 export class SideRegistry {
@@ -42,10 +42,12 @@ export class SideRegistry {
     const record = this.record();
     const state = JSON.parse(fs.readFileSync(path.join(this.directory, 'config.json'), 'utf8'));
     if (state.id !== record.c2cID || !/^[a-f0-9]{32}$/.test(state.epoch)) throw new Error('Side Gate 設定無效。');
-    const policy = this.main.read()?.roots.find(root => root.id === record.c2cID && root.sourceID === this.sourceID.toLowerCase() && root.path === record.path);
+    const policy = this.main.read()?.roots.find(root => root.id === record.c2cID && root.sourceID === this.sourceID.toLowerCase()
+      && (!root.fileIdentity || !record.folderFileIdentity || root.fileIdentity === record.folderFileIdentity)
+      && (!root.fileIdentity || fileIdentity(record.path) === root.fileIdentity));
     if (!policy) throw new Error('Folder Passcode policy 未能確認，未有開放存取。');
     return { ...state, roots: [{ id: record.c2cID, sourceID: this.sourceID.toLowerCase(), path: record.path, name: record.name,
-      enabled: true, epoch: state.epoch, codeRequired: policy.codeRequired ?? false, codeEpoch: policy.codeEpoch }] };
+      fileIdentity: record.folderFileIdentity ?? policy.fileIdentity, enabled: true, epoch: state.epoch, codeRequired: policy.codeRequired ?? false, codeEpoch: policy.codeEpoch }] };
   }
   active() { try { return this.read().roots; } catch { return []; } }
   connection() {

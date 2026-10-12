@@ -241,6 +241,7 @@ private struct ManagerWindow: View {
                             .contextMenu {
                                 Button("Rename") { beginRename(workspace) }
                                 Button("Copy Path") { store.copyText(workspace.path) }
+                                Button("Locate Folder…") { store.locateFolder(workspace) }
                                 Divider()
                                 Button("Add to Side Gates (Keep Both)") { store.addToSideGates(workspace) }
                                     .disabled(workspace.belongsToSideGates || workspace.sideGateRemovalState != nil || store.busy[workspace.id] != nil)
@@ -297,6 +298,7 @@ private struct ManagerWindow: View {
                             .contextMenu {
                                 Button("Rename") { beginRename(workspace) }
                                 Button("Copy Path") { store.copyText(workspace.path) }
+                                Button("Locate Folder…") { store.locateFolder(workspace) }
                             }
                         }
                         .onMove { store.moveFolders(from: $0, to: $1, side: true) }

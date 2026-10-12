@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { Registry, secureWrite } from './registry.mjs';
+import { Registry, secureWrite, fileIdentity } from './registry.mjs';
 import { FolderAccess } from './access.mjs';
 import { instanceAuthStore } from './auth.mjs';
 import { boundedAuthStore, boundedPairingManager, oauthSecurity } from './oauth-security.mjs';
@@ -96,7 +96,10 @@ export function makeMcpServer(backend, registry, access = new FolderAccess(regis
       const root = registry.authorized(args.workspace_id, scopes);
       access.check(root, args.access_key, extra);
       const workspace = new Workspace(root.path);
-      if (workspace.root !== root.path || workspace.id !== root.id) throw Object.assign(new Error('Folder 位置變咗，請喺 App 重新加入。'), { code: 'ROOT_CHANGED' });
+      if (workspace.root !== root.path || root.fileIdentity && fileIdentity(workspace.root) !== root.fileIdentity) throw Object.assign(new Error('Folder 位置變咗，請喺 App 重新定位。'), { code: 'ROOT_CHANGED' });
+      // Existing c2cID values are stable Folder identities even after a move.
+      // The registry has already verified the current path and file identity.
+      workspace.id = root.id;
       const data = await operation(workspace, args);
       requireScope(extra, scope);
       // Read calls already in flight must not disclose their output after revocation.

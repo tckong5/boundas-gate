@@ -5,6 +5,12 @@ struct WorkspaceRecord: Codable, Identifiable, Hashable {
     var name: String
     var path: String
     var c2cID: String
+    /// Stable filesystem reference used to follow a renamed or moved Folder.
+    /// Older records legitimately omit this value.
+    var folderBookmark: Data?
+    /// POSIX device/inode identity used by the Gateway as a substitution guard.
+    /// Older records legitimately omit this value.
+    var folderFileIdentity: String?
     var lastObservedMCPURL: String?
     var previousMCPURL: String?
     var configuredMCPURL: String?
@@ -18,6 +24,11 @@ struct WorkspaceRecord: Codable, Identifiable, Hashable {
     var lastKnownMCPURL: String?
 
     var provider: ConnectionProvider { connectionProvider ?? .cloudflare }
+    var needsFolderLocation: Bool {
+        guard let expected = folderFileIdentity else { return !FileManager.default.fileExists(atPath: path) }
+        guard let current = WorkspaceStore.fileIdentity(path) else { return true }
+        return expected != current
+    }
     // Existing records retain their previous Main Gate membership.
     var belongsToMainGate: Bool { mainGateAdded != false }
     var belongsToSideGates: Bool {
@@ -30,6 +41,8 @@ struct WorkspaceRecord: Codable, Identifiable, Hashable {
         self.name = name
         self.path = path
         self.c2cID = c2cID
+        self.folderBookmark = nil
+        self.folderFileIdentity = nil
         self.sideGateAdded = false
     }
 

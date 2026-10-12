@@ -11,6 +11,12 @@ export function secureWrite(file, value) {
   fs.writeFileSync(temporary, JSON.stringify(value), { mode: 0o600 });
   fs.renameSync(temporary, file);
 }
+export function fileIdentity(value) {
+  try {
+    const stat = fs.statSync(value);
+    return `${stat.dev}:${stat.ino}`;
+  } catch { return null; }
+}
 export class Registry {
   constructor({ directory = process.env.BOUNDAS_GATEWAY_DIR ?? defaultProductPath('gateway'), allowlistFile = workspaceFile } = {}) { this.directory = directory; this.allowlistFile = allowlistFile; }
   ensure() {
@@ -26,6 +32,7 @@ export class Registry {
     catch (error) { if (error.code === 'ENOENT') return null; throw new Error('共用連線設定無效，已停止提供檔案存取。'); }
     if (!/^[a-f0-9]{12}$/.test(config.id) || !Array.isArray(config.roots) || config.roots.some(root =>
       !/^[a-f0-9]{12}$/.test(root.id) || !/^[a-f0-9]{32}$/.test(root.epoch) || typeof root.sourceID !== 'string' || typeof root.path !== 'string' || !path.isAbsolute(root.path) || typeof root.name !== 'string' || typeof root.enabled !== 'boolean'
+      || (root.fileIdentity !== undefined && (typeof root.fileIdentity !== 'string' || !/^\d+:\d+$/.test(root.fileIdentity)))
       || (root.codeRequired !== undefined && typeof root.codeRequired !== 'boolean')
       || (root.codeEpoch !== undefined && !/^[a-f0-9]{32}$/.test(root.codeEpoch))
       || (root.codeRequired === true && !root.codeEpoch)) || new Set(config.roots.map(root => root.id)).size !== config.roots.length) {
@@ -38,7 +45,9 @@ export class Registry {
     catch { return []; } // Never use a stale allowlist when its file is missing or invalid.
   }
   available(root, added = this.addedFolders()) {
-    return root.enabled && added.some(item => item.mainGateAdded !== false && typeof item.id === 'string' && item.id.toLowerCase() === root.sourceID.toLowerCase() && item.c2cID === root.id && item.path === root.path);
+    return root.enabled && added.some(item => item.mainGateAdded !== false && typeof item.id === 'string' && item.id.toLowerCase() === root.sourceID.toLowerCase() && item.c2cID === root.id
+      && item.path === root.path && (!root.fileIdentity || !item.folderFileIdentity || root.fileIdentity === item.folderFileIdentity)
+      && (!root.fileIdentity || fileIdentity(root.path) === root.fileIdentity));
   }
   active() { const added = this.addedFolders(); return (this.read()?.roots ?? []).filter(root => this.available(root, added)); }
   connection() {
@@ -82,11 +91,22 @@ export class Registry {
       const item = added.find(folder => typeof folder.id === 'string' && folder.id.toLowerCase() === sourceID.toLowerCase());
       if (!item || item.mainGateAdded === false) throw new Error('只可以共用已加入 Main Gate 嘅 Folder。');
       const workspace = new Workspace(item.path);
-      if (workspace.root !== item.path || workspace.id !== item.c2cID) throw new Error('Folder 位置變咗，請重新加入。');
-      const old = previous.roots.find(root => root.id === workspace.id);
-      return { id: workspace.id, sourceID: item.id.toLowerCase(), name: item.name, path: workspace.root, enabled: true,
-        codeRequired: old?.codeRequired ?? false, codeEpoch: old?.codeEpoch ?? randomBytes(16).toString('hex'),
-        epoch: old?.enabled && old.sourceID.toLowerCase() === item.id.toLowerCase() && old.path === workspace.root ? old.epoch : randomBytes(16).toString('hex') };
+      if (workspace.root !== item.path) throw new Error('Folder 位置變咗，請喺 App 重新定位。');
+      if (item.folderFileIdentity && fileIdentity(workspace.root) !== item.folderFileIdentity) throw new Error('Folder 身份未能確認，請喺 App 重新定位。');
+      const old = previous.roots.find(root => root.id === item.c2cID);
+      const normalizedSourceID = item.id.toLowerCase();
+      const currentIdentity = item.folderFileIdentity ?? fileIdentity(workspace.root);
+      const sameSource = old?.sourceID?.toLowerCase() === normalizedSourceID;
+      if (old && sameSource) {
+        if (old.fileIdentity ? old.fileIdentity !== currentIdentity : old.path !== workspace.root) {
+          throw new Error('Folder 身份已改變，請喺 App 重新定位；未有保留原有授權。');
+        }
+      }
+      const preservePolicy = old && sameSource && (old.fileIdentity ? old.fileIdentity === currentIdentity : old.path === workspace.root);
+      return { id: item.c2cID, sourceID: item.id.toLowerCase(), name: item.name, path: workspace.root, fileIdentity: item.folderFileIdentity ?? fileIdentity(workspace.root), enabled: true,
+        codeRequired: preservePolicy ? old.codeRequired ?? false : false,
+        codeEpoch: preservePolicy ? old.codeEpoch ?? randomBytes(16).toString('hex') : randomBytes(16).toString('hex'),
+        epoch: preservePolicy && old.enabled ? old.epoch : randomBytes(16).toString('hex') };
     });
     if (new Set(enabled.map(root => root.id)).size !== enabled.length) throw new Error('Folder 清單有重複項目。');
     const disabled = previous.roots.filter(root => !enabled.some(item => item.id === root.id)).map(root => ({ ...root, enabled: false, epoch: root.enabled ? randomBytes(16).toString('hex') : root.epoch }));
@@ -102,7 +122,8 @@ export class Registry {
     if (typeof required !== 'boolean') throw new Error('通行碼設定無效。');
     const config = this.read();
     const added = this.addedFolders();
-    const root = config?.roots.find(item => item.id === id && added.some(folder => folder.c2cID === id && folder.path === item.path && folder.id.toLowerCase() === item.sourceID.toLowerCase()));
+    const root = config?.roots.find(item => item.id === id && added.some(folder => folder.c2cID === id && folder.id.toLowerCase() === item.sourceID.toLowerCase()
+      && folder.path === item.path && (!item.fileIdentity || !folder.folderFileIdentity || item.fileIdentity === folder.folderFileIdentity)));
     if (!root) throw new Error('請先加入呢個 Folder。');
     if ((root.codeRequired ?? false) === required) return root;
     const updated = { ...root, codeRequired: required, codeEpoch: randomBytes(16).toString('hex') };
@@ -112,16 +133,25 @@ export class Registry {
   ensureFolderPolicy(record) {
     const config = this.ensure();
     const old = config.roots.find(root => root.id === record.c2cID);
-    if (!this.addedFolders().some(folder => folder.id === record.id && folder.c2cID === record.c2cID && folder.path === record.path)) throw new Error('Folder 未加入。');
+    if (!this.addedFolders().some(folder => folder.id === record.id && folder.c2cID === record.c2cID && folder.path === record.path
+      && (!record.folderFileIdentity || !folder.folderFileIdentity || record.folderFileIdentity === folder.folderFileIdentity))) throw new Error('Folder 未加入。');
     if (old) {
-      if (old.path !== record.path) throw new Error('Folder policy 路徑不符。');
-      if (old.sourceID === record.id.toLowerCase()) return old;
+      if (old.sourceID === record.id.toLowerCase()) {
+        const currentIdentity = record.folderFileIdentity ?? fileIdentity(record.path);
+        if (old.fileIdentity ? old.fileIdentity !== currentIdentity : old.path !== record.path) {
+          throw new Error('Folder 身份已改變，未有保留原有授權。');
+        }
+        if (old.path === record.path && old.fileIdentity === currentIdentity) return old;
+        const updated = { ...old, name: record.name, path: record.path, fileIdentity: currentIdentity };
+        secureWrite(path.join(this.directory, 'config.json'), { ...config, roots: config.roots.map(root => root.id === old.id ? updated : root) });
+        return updated;
+      }
       const updated = { ...old, sourceID: record.id.toLowerCase(), name: record.name,
         enabled: false, epoch: randomBytes(16).toString('hex'), codeEpoch: randomBytes(16).toString('hex') };
       secureWrite(path.join(this.directory, 'config.json'), { ...config, roots: config.roots.map(root => root.id === old.id ? updated : root) });
       return updated;
     }
-    const root = { id: record.c2cID, sourceID: record.id.toLowerCase(), name: record.name, path: record.path,
+    const root = { id: record.c2cID, sourceID: record.id.toLowerCase(), name: record.name, path: record.path, fileIdentity: record.folderFileIdentity,
       enabled: false, epoch: randomBytes(16).toString('hex'), codeRequired: false, codeEpoch: randomBytes(16).toString('hex') };
     secureWrite(path.join(this.directory, 'config.json'), { ...config, roots: [...config.roots, root] });
     return root;

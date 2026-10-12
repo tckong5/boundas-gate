@@ -40,6 +40,8 @@ final class WorkspaceStore: ObservableObject {
     private let configURL: URL
     private let c2cLogDirectory: URL
     private var lastPersistenceError: Error?
+    private var locationWarningShown = false
+    private var gatewayPathSyncPending = false
 
     var runningCount: Int { sideGateWorkspaces.filter { $0.canOperateSideGate && sideGateConnections[$0.id]?.status?.running == true }.count }
     var healthyConnectionCount: Int { sideGateWorkspaces.filter { $0.canOperateSideGate && sideGateConnections[$0.id]?.usable == true }.count }
@@ -161,6 +163,44 @@ final class WorkspaceStore: ObservableObject {
         }
     }
 
+    /// Reconnect a record whose stable reference could not be resolved. An
+    /// explicit user selection is required; the old record is never silently
+    /// rebound during load.
+    func locateFolder(_ workspace: WorkspaceRecord) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.title = "Locate Folder"
+        panel.prompt = "Use Folder"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let canonical = canonicalPathResolver(url.path)
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: canonical, isDirectory: &isDirectory), isDirectory.boolValue else {
+            alertMessage = "揀選嘅位置唔係 Folder。"
+            return
+        }
+        guard !workspaces.contains(where: { $0.id != workspace.id && canonicalPathResolver($0.path) == canonical }) else {
+            alertMessage = "呢個 Folder 已經加入。"
+            return
+        }
+        guard let index = workspaces.firstIndex(where: { $0.id == workspace.id }) else { return }
+        let original = workspaces[index]
+        if let message = Self.relocationValidationError(originalPath: original.path,
+                                                        bookmark: original.folderBookmark,
+                                                        storedFileIdentity: original.folderFileIdentity,
+                                                        selectedPath: canonical) {
+            alertMessage = message
+            return
+        }
+        workspaces[index].path = canonical
+        workspaces[index].folderBookmark = Self.makeFolderBookmark(for: canonical)
+        workspaces[index].folderFileIdentity = Self.fileIdentity(canonical)
+        guard save() else { workspaces[index] = original; return }
+        gatewayPathSyncPending = true
+        Task { await synchronizeRelocatedFolders() }
+    }
+
     @discardableResult
     func addPath(_ input: String) -> Bool {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -217,6 +257,8 @@ final class WorkspaceStore: ObservableObject {
             ? "\(folderName) · \(canonical.deletingLastPathComponent().lastPathComponent)"
             : folderName
         var record = WorkspaceRecord(name: displayName, path: canonicalPath, c2cID: String(c2cID))
+        record.folderBookmark = Self.makeFolderBookmark(for: canonicalPath)
+        record.folderFileIdentity = Self.fileIdentity(canonicalPath)
         let side = selectedID != SharedGatewayStore.selectionID
         record.mainGateAdded = !side
         record.sideGateAdded = side
@@ -301,6 +343,7 @@ final class WorkspaceStore: ObservableObject {
     // One polling pass; independent of the currently selected Gate.
     func refreshAll() async {
         guard !quitting else { return }
+        await synchronizeRelocatedFolders()
         for workspace in sideGateWorkspaces where workspace.canOperateSideGate && busy[workspace.id] == nil {
             await observeSideGate(workspace)
         }
@@ -422,7 +465,7 @@ final class WorkspaceStore: ObservableObject {
         do { saved = try JSONDecoder().decode([WorkspaceRecord].self, from: data) }
         catch { throw WorkspaceStoreError.invalid(configURL, "JSON could not be decoded.") }
         try Self.validate(saved, source: configURL)
-        workspaces = saved.map { record in
+        let normalized = saved.map { record in
             var record = record
             if record.sideGateAdded == nil {
                 record.sideGateAdded = record.lastObservedMCPURL != nil || record.configuredMCPURL != nil
@@ -433,9 +476,71 @@ final class WorkspaceStore: ObservableObject {
             }
             return record
         }
+        let relocated = try Self.reconcileFolderLocations(normalized, source: configURL)
+        workspaces = relocated
         if workspaces != saved, !save() {
             throw WorkspaceStoreError.persistence(lastPersistenceError ?? CocoaError(.fileWriteUnknown))
         }
+        if workspaces != saved { gatewayPathSyncPending = true }
+    }
+
+    private func synchronizeRelocatedFolders() async {
+        guard !quitting else { return }
+        let original = workspaces
+        do {
+            let updated = try Self.reconcileFolderLocations(workspaces, source: configURL)
+            if updated != original {
+                workspaces = updated
+                guard save() else { workspaces = original; return }
+                gatewayPathSyncPending = true
+            }
+            if gatewayPathSyncPending { await synchronizeGatewayPaths() }
+        } catch {
+            if !locationWarningShown {
+                locationWarningShown = true
+                alertMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func synchronizeGatewayPaths() async {
+        let selected = mainGateWorkspaces.map { $0.id.uuidString.lowercased() }
+        guard await gateway.perform("configure", selectedIDs: selected) else { return }
+        gatewayPathSyncPending = false
+        for connection in sideGateConnections.values { await connection.refresh(background: true) }
+    }
+
+    private static func reconcileFolderLocations(_ records: [WorkspaceRecord], source: URL) throws -> [WorkspaceRecord] {
+        var updated = records
+        for index in updated.indices {
+            let original = updated[index]
+            if let expectedIdentity = original.folderFileIdentity,
+               let currentIdentity = fileIdentity(original.path), expectedIdentity != currentIdentity {
+                // Keep the record unavailable until the user explicitly
+                // locates it; never bind to the replacement automatically.
+                continue
+            }
+            if let bookmark = original.folderBookmark, let resolved = resolveFolderBookmark(bookmark) {
+                let currentPath = canonicalPath(original.path)
+                if resolved.path != currentPath {
+                    if FileManager.default.fileExists(atPath: original.path) {
+                        let oldIdentity = fileIdentity(original.path)
+                        guard oldIdentity != nil, oldIdentity == fileIdentity(resolved.path) else { continue }
+                    }
+                    guard !updated.enumerated().contains(where: { $0.offset != index && canonicalPath($0.element.path) == resolved.path }) else { continue }
+                    updated[index].path = resolved.path
+                }
+                updated[index].folderFileIdentity = fileIdentity(resolved.path)
+                if resolved.stale { updated[index].folderBookmark = makeFolderBookmark(for: resolved.path) }
+            } else if FileManager.default.fileExists(atPath: original.path) {
+                // Legacy records gain the stable reference lazily while their
+                // original location is still available.
+                updated[index].folderBookmark = makeFolderBookmark(for: original.path)
+                updated[index].folderFileIdentity = fileIdentity(original.path)
+            }
+        }
+        try validate(updated, source: source)
+        return updated
     }
 
     private static func validate(_ records: [WorkspaceRecord], source: URL) throws {
@@ -472,6 +577,54 @@ final class WorkspaceStore: ObservableObject {
             return value
         }
         return URL(fileURLWithPath: path).standardizedFileURL.path
+    }
+
+    static func makeFolderBookmark(for path: String) -> Data? {
+        let url = URL(fileURLWithPath: path, isDirectory: true)
+        return try? url.bookmarkData(options: [], includingResourceValuesForKeys: [.fileResourceIdentifierKey], relativeTo: nil)
+    }
+
+    static func resolveFolderBookmark(_ data: Data) -> (path: String, stale: Bool)? {
+        var stale = false
+        guard let url = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale) else { return nil }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else { return nil }
+        return (canonicalPath(url.path), stale)
+    }
+
+    /// Returns nil only when the selected Folder can safely retain the
+    /// existing WorkspaceRecord identity. A user selection by itself is not
+    /// evidence of identity when no stable reference remains.
+    static func relocationValidationError(originalPath: String,
+                                          bookmark: Data?,
+                                          storedFileIdentity: String?,
+                                          selectedPath: String) -> String? {
+        let selectedIdentity = fileIdentity(selectedPath)
+        if let storedFileIdentity {
+            guard selectedIdentity == storedFileIdentity else {
+                return "未能確認揀選嘅 Folder 係原本嗰個 Folder；狀態未有改動。"
+            }
+        }
+        if let bookmark {
+            guard let resolved = resolveFolderBookmark(bookmark),
+                  let resolvedIdentity = fileIdentity(resolved.path),
+                  selectedIdentity == resolvedIdentity else {
+                return "未能確認揀選嘅 Folder 係原本嗰個 Folder；狀態未有改動。"
+            }
+            return nil
+        }
+        if storedFileIdentity != nil { return nil }
+        if FileManager.default.fileExists(atPath: originalPath) {
+            return "原本 Folder 仍然存在，唔需要重新定位。"
+        }
+        return "未能確認原本 Folder 身份；請先移除，再以新 Folder 加入。"
+    }
+
+    nonisolated static func fileIdentity(_ path: String) -> String? {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: path),
+              let device = attributes[.systemNumber] as? NSNumber,
+              let inode = attributes[.systemFileNumber] as? NSNumber else { return nil }
+        return "\(device.stringValue):\(inode.stringValue)"
     }
 
     static func c2cID(for canonicalPath: String) -> String {

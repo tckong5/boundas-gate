@@ -1,115 +1,111 @@
-> 歷史實作報告。2026-10-08 已用正式 Side Gate unlock 取代本文原有 fail-closed 暫行方案；最新實作見 [security-robustness-review.md](security-robustness-review.md)。
+> Historical implementation report. On 2026-10-08, full Side Gate unlock replaced the temporary fail-closed restriction described here. See [security-robustness-review.md](security-robustness-review.md) for that implementation.
 
-# Gate contract v1 — 實作及驗證
+# Gate contract v1 — Implementation and verification
 
-日期：2026-10-07
+Date: 2026-10-07.
 
-Contract：[Product Model / Architecture Invariants v1](product-model-architecture-invariants-v1.md)。Contract semantics 保持不變。
+Contract: [Product Model / Architecture Invariants v1](product-model-architecture-invariants-v1.md). Contract semantics remained unchanged.
 
-## Review 發現及修正
+## Findings and fixes
 
-| 原有衝突 | 修正 |
+| Original conflict | Fix |
 | --- | --- |
-| `sideGateAdded` 只篩選 sidebar | Store 所有 Side lifecycle、批量操作、refresh、diagnostics 及 counts 依 membership 篩選；Node helper 再檢查 persisted registry |
-| Remove 會撤銷 Main 分享並刪 Folder | 分開 `Remove Side Gate` 與 `Remove Folder`；Side decommission 完成後才取消 membership |
-| Folder 數量係 start / pair / reconnect prerequisite | Main Gate identity 可獨立初始化；server、launcher、pairing、reconnect policy 及 UI 都接受空清單 |
-| Gate Open 依賴授權及 Folder 數量 | runtime `isOpen` 只依 Local + Tunnel；`isReady` 保留為 setup journey |
-| UI 混用 Workspace / Repository / AI Connection | 一般 UI 使用 Folder / Gate / Tunnel / MCP Connection；internal API names 保留 |
-| Main Passcode 可以被 Side 繞過 | 按用戶確認，Protected Folder 經 Side 暫時拒絕存取；完整 Side unlock 另做 |
+| `sideGateAdded` filtered only the sidebar | Filter all Side lifecycle, batch, refresh, diagnostics, and counts by membership; the Node helper rechecks the persisted registry |
+| Remove revoked Main sharing and deleted the Folder | Separate Remove Side Gate from Remove Folder; clear membership only after decommission succeeds |
+| Folder count blocked start/pair/reconnect | Initialize Main identity independently; server, launcher, pairing, recovery, and UI accept an empty list |
+| Gate Open depended on authorization/Folder count | Runtime `isOpen` depends on Local + Tunnel; `isReady` remains setup-journey state |
+| UI mixed Workspace/Repository/AI Connection terminology | Use Folder/Gate/Tunnel/MCP Connection in ordinary UI while retaining internal API names |
+| Side could bypass Main Passcode policy | Temporarily reject protected Side access as explicitly approved; full Side unlock was deferred |
 
 ## Runtime enforcement
 
 ### Side Gate membership
 
-- Main Gate Add Folder 預設 `sideGateAdded = false`。
-- Side Gates Add by Path / Add Folder 可以加入現有或新 Folder；不會複製 Folder record。
-- Main-only Folder 不會被 Side start / stop / reconnect / refresh / diagnostics / counts 使用。
-- `side-lifecycle.mjs` 每個操作從磁碟重新檢查 membership，拒絕 Main-only、移除中及失敗待重試嘅 Gate。
-- 新 Side daemon 每次 bearer request 重新檢查 Folder membership 及 Passcode policy；membership 被移除時停止服務。
-- 使用現有 Cloudflare / Tailscale providers；沒有新增 ngrok 或 TunnelProvider framework。
+- Main Gate Add Folder defaults to `sideGateAdded = false`.
+- Side Add by Path/Add Folder can add existing or new Folders without duplicating records.
+- Main-only Folders are excluded from Side start/stop/reconnect/refresh/diagnostics/counts.
+- `side-lifecycle.mjs` rereads membership on every operation and rejects Main-only, removing, or failed/pending-retry Gates.
+- New Side daemons recheck membership and Passcode policy on bearer requests and stop serving when membership is removed.
+- Existing Cloudflare/Tailscale providers are reused; no ngrok or TunnelProvider framework was introduced.
 
 ### Remove Side Gate
 
-1. 先持久化 `removing`，保留 row。
-2. 確認 service identity、Folder path 及本機 admin credential；未知服務唔會 blind kill。
-3. 停止 Side-owned Tunnel，撤銷 Side MCP tokens／pairing，停止 bridge。
-4. 清理本 Gate journalled routes、Side auth file、runtime admin credential、daemon marker。
-5. 清除 active / configured MCP URL；`lastKnownMCPURL` 只保留作 history。
-6. 成功儲存後 `sideGateAdded = false`；Folder identity/path/name/provider preference 保留。
-7. 失敗保留 `failed` 及 Retry；中途 App 重開會恢復成 Retry 狀態。
+1. Persist `removing` and retain the row.
+2. Verify service identity, Folder path, and local admin credential; never blindly kill an unknown service.
+3. Stop the Side-owned Tunnel, revoke Side tokens/pairing, and stop its bridge.
+4. Clean that Gate's journaled routes, Side auth file, runtime credential, and daemon marker.
+5. Clear active/configured MCP URLs; retain `lastKnownMCPURL` only as history.
+6. Persist success before setting `sideGateAdded = false`; retain Folder identity/path/name/provider preference.
+7. On failure, retain `failed` and Retry; interrupted removal resumes in a retryable state after app restart.
 
-Main Gate config、auth、分享狀態及 Passcode policy 不會被 Side remove 修改。
+Side removal does not modify Main configuration, authorization, sharing, or Passcode policy.
 
-`Remove Folder` 只刪 App record，不刪 filesystem Folder，亦唔 stop Main Gate。有 Side Gate 嘅 Folder 要先完成 Remove Side Gate。
+Remove Folder deletes only the App record, never the filesystem Folder or Main Gate runtime. A Folder with a Side Gate must first complete Side removal.
 
 ### Authorization isolation
 
-- Main Gate 用獨立 Gate ID／AuthStore；每次 file operation 仍驗證 current shared registry。
-- Side Gates 使用自己嘅 workspace-bound AuthStore／runtime；跨 Gate token 會被拒絕。
-- Side remove 會刪 Side auth state；重新加入同一 Folder，不會重新啟用舊 access／refresh token 或 registration。
-- Authorized 只代表持續有效嘅授權，不代表 active request 或 live AI session。
+- Main has an independent Gate ID/AuthStore and checks current sharing on every file operation.
+- Side Gates use their own workspace-bound AuthStores/runtimes; cross-Gate tokens are rejected.
+- Removal deletes Side authorization state. Re-adding the same Folder does not reactivate old access/refresh tokens or registrations.
+- Authorized means persistent valid authorization, not an active request or live AI session.
 
-### Zero Folder Main Gate
+### Zero-Folder Main Gate
 
-- Gate ID、Local service、Tunnel、pairing／OAuth 均可以先於 Folder 存在。
-- `list_workspaces → []` 係正常結果。
-- 移除最後一個 Folder 即時 revoke 資源存取，但 Local/Tunnel 仍可以 Open。
-- 空 registry 同樣允許 reconnect、crash recovery、stop/start；原有 Gate ID／OAuth／固定 URL 保留。
-- 零 MCP authorizations 不會令 runtime Gate Closed。
+- Gate identity, local service, Tunnel, pairing, and OAuth can exist before any Folder.
+- `list_workspaces → []` is normal.
+- Removing the last Folder revokes resource access immediately while Local/Tunnel can remain Open.
+- Empty registries support reconnect, crash recovery, and stop/start while retaining Gate identity/OAuth/fixed URL.
+- Zero authorizations do not close a running Gate.
 
-### Passcode
+### Passcodes at this historical checkpoint
 
-Policy 目前仍保存在 Gateway registry root metadata，按 Folder identity 讀取，唔係新建一套 policy store。
+Policy remained in Gateway root metadata, keyed by Folder identity, without a separate policy store. Main unlock/temporary access semantics were unchanged. The Side bearer guard read the same policy, including retained policy for Folders no longer shared through Main.
 
-Main Gate unlock／temporary access 行為維持原有 semantics。Side bearer guard 會讀取同一 Folder 嘅 policy，包括 Main sharing 已取消但 policy 仍存在嘅 Folder。
+**Limitation at the time:** protected Side Folders were denied because no Side unlock API existed yet. Main temporary keys did not authorize Side access. This explicitly accepted conservative restriction was not presented as complete cross-Gate unlock support.
 
-**目前限制：** Protected Folder 經 Side Gate 一律拒絕，未有 Side unlock API。Main temporary access key 唔會跨 Gate grant 授權。此處係用戶明確接受嘅保守處理；唔宣稱已完成跨 Gate unlock。
+## UI/metadata versus runtime
 
-## UI / metadata 與 runtime 嘅區分
-
-| 項目 | 層次 |
+| Item | Enforcement layer |
 | --- | --- |
-| Side membership、decommission、跨 Gate token 拒絕 | 實際 Store / Node / MCP runtime enforce |
-| Folder dynamic ACL、path / symlink / readonly restrictions | 原有 server checks 保留，integration tests 覆蓋 |
-| Main zero Folder startup / pair / recover | 真正 launcher + daemon + OAuth runtime |
-| Gate Open vs setup Ready | UI mapping；依實際 Local/Tunnel diagnostics，冇新增網絡 state machine |
-| MCP client Authorized / Invalid / Not authorized | 持久化 authorization evidence，唔係 live client health |
-| `lastKnownMCPURL`、provider / domain reservation | history / configuration metadata，唔係 active endpoint |
-| Passcode Side support | 真正 fail-closed；完整 temporary unlock 尚未實作 |
+| Side membership, decommission, cross-Gate rejection | Store/Node/MCP runtime |
+| Dynamic ACL, path/symlink/read-only restrictions | Existing server checks and integration tests |
+| Zero-Folder Main startup/pair/recovery | Launcher, daemon, OAuth runtime |
+| Gate Open versus setup Ready | UI mapping from Local/Tunnel diagnostics, without a new network state machine |
+| Authorized/Invalid/Not authorized clients | Persistent authorization evidence, not live client health |
+| `lastKnownMCPURL`, provider/domain reservation | Historical/configuration metadata, not an active endpoint |
+| Side Passcode support at this checkpoint | Real fail-closed restriction; full temporary unlock not yet implemented |
 
 ## Migration
 
-- 新增 Folder／普通 Main restart 不需要重新 Add Plugin 或 OAuth。
-- 舊 record 缺少 membership 時，只以曾記錄嘅 Side endpoint 作一次 migration；provider preference 本身唔會建立 Side Gate。
-- 舊 Side daemon 缺少新 membership / policy guard，第一次 refresh 會安全停用佢；重新 Open Side Gate 即安裝新 guard，保留原有 OAuth。
-- 若 runtime identity 或 route ownership 無法確認，操作會失敗並保留 Retry／diagnostics，不會隱藏 row 或動其他 Gate。
-- Remove Side Gate 後 re-add 屬新授權流程，需要重新配對，符合 decommission semantics。
+- Adding a Folder or normally restarting Main requires no new Plugin registration/OAuth.
+- Legacy records missing membership use previously recorded Side endpoint evidence for one-time migration; provider preference alone does not create a Side Gate.
+- Legacy Side daemons without membership/policy guards are safely stopped on first refresh. Reopening installs the new guard while retaining OAuth.
+- Unverifiable runtime identity/route ownership fails with Retry/diagnostics, without hiding rows or touching other Gates.
+- Re-adding after Remove Side Gate is a new authorization flow and requires pairing, consistent with decommission semantics.
 
-## 驗證
+## Verification
 
-Debug build：✅ 成功。
+Debug build passed. Swift: 55 tests passed; Gateway/Tunnel Node: 52 tests passed. Relevant tests were rerun after the final Side lifecycle fix.
 
-Swift：55 tests PASS；Gateway／Tunnel Node：52 tests PASS。最後 Side lifecycle 修正亦再跑相關 tests。
-
-| 驗收 | Result | 覆蓋 |
+| Acceptance | Result | Coverage |
 | --- | --- | --- |
-| Main Add Folder 不自動加入 Side | PASS | Swift Store + Node membership checks |
-| Main-only 不受 Side batch start / stop / reconnect / refresh | PASS | Swift lifecycle tests |
-| 現有／新 Folder 加入 Side | PASS | Swift lifecycle tests |
-| Remove Side 後 Folder 仍存在 | PASS | Store persistence + 真 Side daemon |
-| Main Gate 分享／授權完全不變 | PASS | 真 OAuth/file read + Main config/auth bytes 比對 |
-| Remove 失敗保留 row，可 Retry | PASS | Store failed/restart/retry + route cleanup failure |
-| Re-add 不復活舊 authorization | PASS | 真 Side OAuth token 被拒絕，再配對後正常 |
-| 同一 Folder Main / Side coexist | PASS | 真 MCP requests，移除 Side 後 Main 仍可讀 |
-| Main token → Side / Side A token → Side B | PASS | 真 HTTP/MCP 401；反方向同樣拒絕 |
-| 0 Folder startup / pair / reconnect / recovery | PASS | 真 launcher/daemon/control + local transport IPC fixture |
-| 最後 Folder 移除，Gate 仍 Open | PASS | 真 Main service/Tunnel fixture，list 空、舊 root access 拒絕 |
-| Protected Folder Side 不可繞過 | PASS | 真 bearer guard，包括 Main sharing disabled |
-| 舊 Side daemon migration 保留 OAuth | PASS | 舊 C2C daemon → 安全停止 → 新 daemon 接受原 token |
+| Main Add Folder does not create Side membership | PASS | Swift Store and Node checks |
+| Side batch actions exclude Main-only Folders | PASS | Swift lifecycle tests |
+| Add existing/new Folder to Side | PASS | Swift lifecycle tests |
+| Folder survives Side removal | PASS | Store persistence and real Side daemon |
+| Main sharing/authorization stays unchanged | PASS | Real OAuth/file reads and config/auth byte comparison |
+| Failed removal retains row and Retry | PASS | Store failure/restart/retry and route cleanup failure |
+| Re-add does not revive old authorization | PASS | Real old Side token rejection and successful new pairing |
+| Main/Side coexist for one Folder | PASS | Real MCP reads; Main remains accessible after Side removal |
+| Main token → Side / Side A token → Side B | PASS | Real HTTP/MCP 401; reverse direction also rejected |
+| Zero-Folder startup/pair/reconnect/recovery | PASS | Real launcher/daemon/control and local transport IPC fixture |
+| Last Folder removal keeps Gate Open | PASS | Main service/Tunnel fixture; empty list and denied old root |
+| Protected Side Folder cannot bypass policy | PASS | Real bearer guard, including disabled Main sharing |
+| Legacy Side migration retains OAuth | PASS | Legacy daemon safely replaced; new daemon accepts original token |
 
-測試用了真正本機 MCP/OAuth/daemon；transport 部分使用隔離 fixtures，冇把 fixtures 當成外網 health。未做完整 manual UX 或真實外網安裝驗收。
+Tests used real local MCP/OAuth/daemons and isolated transport fixtures. Fixtures were not claimed as public-network health. Complete manual UX and real external installation acceptance were outside this round.
 
-## 今次修改檔案
+## Files changed in the original implementation
 
 ### App
 
@@ -121,32 +117,23 @@ Swift：55 tests PASS；Gateway／Tunnel Node：52 tests PASS。最後 Side life
 - `Sources/C2CManager/GateConnectionJourney.swift`
 - `Sources/C2CManager/SharedGatewayView.swift`
 - `Sources/C2CManager/C2CManagerApp.swift`
-- `Sources/C2CManager/ConnectionGuidance.swift`（後續 [runtime ownership cleanup](side-gate-runtime-owner.md) 已移除無 production caller 嘅 legacy helper）
+- `Sources/C2CManager/ConnectionGuidance.swift` (later removed as unused in the [runtime ownership cleanup](side-gate-runtime-owner.md))
 
 ### Runtime
 
-- `Resources/Gateway/registry.mjs`
-- `Resources/Gateway/launcher.mjs`
-- `Resources/Gateway/server.mjs`
-- `Resources/Gateway/side-lifecycle.mjs`（新增）
-- `Resources/Gateway/oauth-presentation.mjs`
-- `Resources/Tailscale/provider.mjs`
-- `Resources/Tailscale/embedded.mjs`
+- Gateway `registry.mjs`, `launcher.mjs`, `server.mjs`, new `side-lifecycle.mjs`, and `oauth-presentation.mjs`.
+- Tailscale `provider.mjs` and `embedded.mjs`.
 
-### Tests / docs
+### Tests and documentation
 
-- `Tests/C2CManagerTests/SideGateLifecycleTests.swift`（新增）
-- `Tests/C2CManagerTests/GateConnectionJourneyTests.swift`
-- `Tests/C2CManagerTests/GatewayReconnectPolicyTests.swift`
-- `Tests/C2CManagerTests/SharedGatewayConnectionTests.swift`
-- `Tests/Gateway/gateway.test.mjs`
-- `Tests/Gateway/side-lifecycle.test.mjs`（新增）
-- `Tests/Gateway/zero-folder-launcher.test.mjs`（新增）
-- `docs/gate-contract-v1-implementation.md`（本文件）
+- New `Tests/C2CManagerTests/SideGateLifecycleTests.swift`.
+- Swift `GateConnectionJourneyTests.swift`, `GatewayReconnectPolicyTests.swift`, and `SharedGatewayConnectionTests.swift`.
+- Gateway `gateway.test.mjs`, new `side-lifecycle.test.mjs`, and new `zero-folder-launcher.test.mjs`.
+- This report.
 
-## 可開啟 build
+## Builds available at the time
 
 - `dist/Boundas Gate Debug.app`
 - `.build/apps/Boundas Gate New User Test.app`
 
-更新兩個既有 Debug / isolated test bundles，冇重置 Folder／OAuth 資料。一般 release bundle 仍維持原版。今次冇 commit，冇做 ngrok。
+The existing Debug/isolated test bundles were updated without resetting Folders/OAuth. The normal release bundle remained unchanged. This round made no commit and added no ngrok support.

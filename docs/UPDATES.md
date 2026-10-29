@@ -15,7 +15,7 @@ as `SUFeedURL`; runtime environment cannot override a production app's feed.
 Automatic checks are enabled when a feed is configured (Sparkle retains the
 user's consent/preferences); automatic installation is not enabled.
 
-Current release remains 1.2.0 / build 7. For each future release increment
+The current release is 1.2.1 / build 8. For each future release increment
 `PRODUCTION_BUILD_NUMBER` in `scripts/release-config.sh`; update `RELEASE_VERSION`
 to the intended public version. Never reuse a published build number.
 

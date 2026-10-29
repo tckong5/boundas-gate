@@ -2,11 +2,11 @@
 
 <img src="Resources/AppIcon.png" width="128" alt="Boundas Gate icon">
 
-> Give an AI app access to selected local Folders without giving it access to the whole Mac.
+> Give an AI app access to selected local folders without giving it access to the whole Mac.
 
-Boundas Gate 係 macOS 原生 app。你可以揀要分享嘅 **Folder**，再由一個 **Main Gate** 或獨立嘅 **Side Gate** 對外提供 MCP endpoint。Gate、Tunnel、MCP Connection 同 Folder 係分開管理；Gate 可以冇 Folder，亦可以喺未授權任何 AI app 時保持運行。
+Boundas Gate is a native macOS app. Select the **Folders** you want to share, then expose an MCP endpoint through a **Main Gate** or independent **Side Gate**. Gates, Tunnels, MCP Connections, and Folders are managed separately. A Gate can run without any shared Folders or authorized AI apps.
 
-## 目前使用流程
+## Getting started
 
 ```text
 Add Folder
@@ -22,80 +22,80 @@ Connect an AI App
 Ready to Use
 ```
 
-1. 用左邊 **Add Folder** 加入資料夾。Main Gate 加入 Folder 唔會自動建立 Side Gate；Side Gate 亦要明確加入。
-2. 選擇 Main Gate 或 Side Gate，按 **Open Gate**。呢一步只啟動本機 Gate。
-3. 喺 **Secure Access** 按 **Sign In**／**Set Up**。Fresh/current Shared Secure Access 只需完成一次 Tailscale login；Main Gate 同 Side Gate 共用同一個 Tailscale identity，但每個 Gate 有自己嘅 route 同 MCP authorization。Existing legacy fixed-address／external transport 會保留到你明確執行 migration，app 唔會靜默改 endpoint 或 device identity。
-4. 喺 **Connect an AI App** 揀 ChatGPT、Claude 或其他 MCP-compatible app，跟住畫面入面嘅 setup instructions。
-5. 完成授權後，畫面會顯示 **Ready to Use**。已完成 onboarding 嘅 Gate，即使之後變成 0 MCP Connections，仍會保留正常 empty state，而唔會被當成首次設定。
+1. Use **Add Folder** in the sidebar. Adding a Folder to Main Gate does not automatically create a Side Gate; Side Gate membership is explicit.
+2. Select Main Gate or a Side Gate and click **Open Gate**. This starts the local Gate only.
+3. In **Secure Access**, click **Sign In** or **Set Up**. Current Shared Secure Access requires one Tailscale login. Main and Side Gates share a Tailscale identity while retaining separate routes and MCP authorization. Existing legacy fixed-address or external transport stays unchanged until you explicitly migrate it; the app never silently changes an endpoint or device identity.
+4. In **Connect an AI App**, choose ChatGPT, Claude, or another MCP-compatible app and follow the setup instructions.
+5. After authorization, the Gate shows **Ready to Use**. Once onboarding has completed, removing every MCP Connection leaves a normal empty state instead of restarting first-time setup.
 
 ### ChatGPT setup
 
-現時 ChatGPT setup 會引導你：
+The current setup instructions guide you through:
 
-1. Open Plugins
-2. Click Add +
-3. Choose Create MCP App
+1. Open Plugins.
+2. Click Add +.
+3. Choose Create MCP App.
 
-之後按頁面嘅 Name、Description、Server URL 同 authorization 指示完成連線。URL 只喺 **Connect an AI App** 顯示；Secure Access 只負責「外面可唔可以到達 Gate」。
+Complete the connection using the displayed Name, Description, Server URL, and authorization instructions. The primary URL appears in **Connect an AI App**; Secure Access manages whether the Gate is externally reachable.
 
-Claude 同其他 MCP app 使用同一個 Gate model，但各自嘅 MCP Connection、token 同 authorization boundary 互不共用。
+Claude and other MCP apps use the same Gate model, with independent MCP Connections, tokens, and authorization boundaries.
 
-## Gate、Folder 同 authorization
+## Gates, Folders, and authorization
 
-- **Main Gate** 可以有 0..n Folders。
-- **Side Gate** 係一個獨立管理嘅 Gate，預設只提供一個明確加入嘅 Folder。
-- 同一個 Folder 可以同時屬於 Main Gate 同 Side Gate；移除 Side Gate 唔會刪除 Folder 或改 Main Gate。
-- 每個 MCP Connection 只屬於一個 Gate。Authorized 只代表 authorization 存在，唔代表有 live session。
-- Gate health 係 Local + Secure Access；MCP Connections 同 Folder sharing 係獨立資訊。
-- Folder Passcode Protection 係 Folder-level policy。Folder 經 Main Gate 或 Side Gate 暴露時，都必須遵守同一政策。
+- **Main Gate** can share zero or more Folders.
+- A **Side Gate** is managed independently and normally exposes one explicitly added Folder.
+- A Folder can belong to both Main Gate and Side Gate. Removing a Side Gate does not delete the Folder or change Main Gate.
+- Each MCP Connection belongs to one Gate. Authorized means an authorization exists; it does not imply a live session.
+- Gate health covers Local + Secure Access. MCP Connections and Folder sharing are separate information.
+- Folder Passcode Protection is a Folder-level policy enforced through both Main and Side Gates.
 
-詳細 product contract、Side Gate lifecycle 同 shared tunnel model：
+Detailed contracts and lifecycle documentation:
 
 - [Product model invariants](docs/product-model-architecture-invariants-v1.md)
 - [Side Gate runtime owner](docs/side-gate-runtime-owner.md)
-- [Secure Access / tunnel journey](docs/tunnel-management.md)
+- [Secure Access and tunnel journey](docs/tunnel-management.md)
 - [Security robustness review](docs/security-robustness-review.md)
 
 ## Secure Access
 
-Secure Access 係 user-facing Tunnel management。Fresh/current Shared Secure Access 正常只顯示 provider 同 ready 狀態，例如 `Tailscale · Connected`；低頻嘅 Recheck、Sign Out 同 technical diagnostics 收喺 `…` 或 Advanced。Main Gate 同 Side Gate 共用 Tailscale identity，但每個 Gate 使用獨立 URL path、route ownership 同 authorization。Existing legacy fixed-address／external transport 會保留到明確 migration；唔會靜默改 existing endpoint 或 device identity。
+Secure Access provides user-facing Tunnel management. Healthy Shared Secure Access normally shows the provider and readiness, such as `Tailscale · Connected`. Less frequent actions, including Recheck, Sign Out, and technical diagnostics, are available under `…` or Advanced. Main and Side Gates share a Tailscale identity while maintaining independent URL paths, route ownership, and authorization. Existing legacy fixed-address or external transport is preserved until an explicit migration.
 
-App 內置 Node.js、C2C backend、cloudflared 同 Tailscale userspace runtime。實際 bundle 亦保留 Node、C2C、cloudflared、Go／Tailscale 依賴嘅 license 文件；根目錄 [LICENSE](LICENSE) 只適用於 Boundas Gate 自己嘅程式碼。
+The app bundles Node.js, the C2C backend, cloudflared, and a Tailscale userspace runtime. The bundle retains the licenses for Node, C2C, cloudflared, Go, and Tailscale dependencies. The root [LICENSE](LICENSE) applies only to Boundas Gate's own source code.
 
-## Window、Quit 同更新
+## Windows, quitting, and updates
 
-關閉主視窗只會關閉 UI；Gate 繼續運行，可以由 menu bar 嘅 **Show Boundas Gate** 返回。**Quit Boundas Gate** 會依次停止 Side Gates、Main Gate 同已驗證屬於當前 profile 嘅 bundled helper，再退出 app；保留 desiredRunning、Folder、OAuth 同 Tailscale identity，下一次啟動可以重用既有設定。
+Closing the main window closes the UI only; Gates keep running. Use **Show Boundas Gate** in the menu bar to return. **Quit Boundas Gate** stops Side Gates, Main Gate, and verified profile-owned bundled helpers before exiting. It preserves desired-running intent, Folders, OAuth, and Tailscale identity so the next launch can reuse existing state.
 
-Main Gate external → Shared Secure Access 嘅明確 migration、production MCP read 同重啟 identity continuity 已驗收。既有 external endpoint 仍只會由用戶明確批准 migration，唔會靜默更換。
+Explicit Main Gate external → Shared Secure Access migration, production MCP reads, and identity continuity across restarts have passed acceptance. Migrating an existing external endpoint still requires the user's explicit approval.
 
-v1.2.1 亦支援 Folder rename／move 後保留原有 Folder identity；呢項係 v1.2.0 發布後加入，v1.2.0 release 本身未包含。
+v1.2.1 also preserves Folder identity across renames and moves. This was added after v1.2.0 and is not included in the v1.2.0 release assets.
 
-Sparkle 2.10 更新整合已完成，menu bar 提供 **Check for Updates…** 同原生 **About Boundas Gate…**。Update archive 必須通過 EdDSA 驗證；私鑰只留喺 Login Keychain。目前正式 appcast URL 尚未設定，未設定 feed 嘅 build 唔會啟動更新檢查。發布設定及隔離測試方法見 [UPDATES.md](docs/UPDATES.md)。
+Sparkle 2.10 integration is implemented, with **Check for Updates…** and the native **About Boundas Gate…** panel. Update archives require EdDSA verification; the private key stays in Login Keychain. The production appcast URL is not configured yet, and builds without a feed do not check for updates. See [UPDATES.md](docs/UPDATES.md) for release configuration and isolated testing.
 
 ## Passcode Protection
 
-Folder row 永遠顯示固定嘅 password-lock icon。icon 只表達 Passcode Protection policy On／Off，唔會因 temporary unlock 變成 open lock。Popover 會分開顯示：
+Folder rows always display the same password-lock icon. It represents the protection policy, not temporary unlock state. The popover separately shows:
 
-- Protection policy：Passcode Protection On／Off
-- Temporary access：Protected、Temporarily Unlocked、expiry 同 revoke action
+- Protection policy: Passcode Protection On or Off.
+- Temporary access: Protected or Temporarily Unlocked, expiration, and revocation.
 
-Passcode 係額外 Folder-level protection，唔代表 Off 時 Folder 沒有 Gate protection。詳細 capability、expiry 同撤銷規則見 [product model](docs/product-model-architecture-invariants-v1.md)。
+Passcodes add Folder-level protection. Turning the policy off does not remove Gate authorization. See the [product model](docs/product-model-architecture-invariants-v1.md) for capability, expiration, and revocation rules.
 
-## 資料與 profile
+## Data and profiles
 
-正式 app 使用：
+The production app uses:
 
 ```text
 ~/Library/Application Support/Boundas Gate
 ```
 
-New User Test 使用獨立嘅 `Boundas Gate New User Test` profile。Raw Debug executable 預設使用 `Boundas Gate Debug`，唔會讀取或遷移 production state。只有 DEBUG build 明確設定 `BOUNDAS_DATA_PROFILE=production` 先會 opt in 到 production profile；New User Test 會忽略呢個 override。
+New User Test uses the isolated `Boundas Gate New User Test` profile. Raw Debug executables default to `Boundas Gate Debug` and do not read or migrate production state. A DEBUG build can explicitly opt into production with `BOUNDAS_DATA_PROFILE=production`; New User Test ignores this override.
 
-App 會保留 existing Gate identity、OAuth、Tailscale state 同 Folder records；bundle identifier 唔係 Gate identity。首次安裝／升級嘅 migration 只喺正式 production profile 進行，唔會喺 debug 或 test profile 觸碰真實資料。
+Existing Gate identity, OAuth, Tailscale state, and Folder records are retained. The bundle identifier is not the Gate identity. Initial installation or upgrade migration runs only for the production profile; Debug and test profiles do not migrate real user data.
 
-## Build、測試同 release
+## Build and release
 
-本地／測試 build 保留 ad hoc signing：
+Local and test builds use ad-hoc signing:
 
 ```sh
 ./scripts/build-app.sh
@@ -103,11 +103,11 @@ App 會保留 existing Gate identity、OAuth、Tailscale state 同 Folder record
 ./scripts/build-new-user-app.sh
 ```
 
-release identity 集中喺 [`scripts/release-config.sh`](scripts/release-config.sh)：product name、bundle ID、版本同 production build number 由同一份設定提供。現行公開 release 係 **1.2.1**；production build number 係 **8**。套件已發布到 [GitHub Releases](https://github.com/tckong5/boundas-gate/releases/tag/v1.2.1)，使用 ad-hoc signing、未 Apple notarized；macOS Gatekeeper 可能需要手動選擇 Open Anyway。Developer ID／notarization 係可選嘅未來 release path，並非目前安裝要求。
+[`scripts/release-config.sh`](scripts/release-config.sh) is the single source of truth for the product name, bundle identifiers, version, and production build number. The current public release is **1.2.1, build 8**, available on [GitHub Releases](https://github.com/tckong5/boundas-gate/releases/tag/v1.2.1). It is **ad-hoc signed and not Apple notarized**. macOS Gatekeeper may require manual approval with **Open Anyway**. Developer ID signing and notarization are optional future release paths, not installation requirements for this release.
 
-**1.2.1（build 8）** 修正 macOS filesystem identity recovery 同 Gateway／WorkspaceStore identity 同步，保留既有 Gate、OAuth 同 Passcode 設定。
+**1.2.1 (build 8)** fixes macOS filesystem identity recovery and Gateway/WorkspaceStore identity synchronization while preserving existing Gate, OAuth, and Passcode settings.
 
-正式 Developer ID path 必須明確要求簽名及公證 credentials，唔會靜默退回 ad hoc：
+The optional Developer ID mode requires explicit signing and notarization credentials and never silently falls back to ad-hoc signing:
 
 ```sh
 BOUNDAS_BUILD_MODE=public \
@@ -121,9 +121,9 @@ BOUNDAS_NOTARY_PROFILE="boundas-release" \
 ./scripts/package-release.sh
 ```
 
-`BOUNDAS_NOTARY_PROFILE` 係 `xcrun notarytool` Keychain profile 名稱。private key、Apple ID password 同 app-specific password 唔可以放入 repo。Public path 會用 hardened runtime、timestamp、nested Mach-O signing、notarization、stapling、`codesign` 同 `spctl` verification；冇 credentials 時會直接 fail。Bundled Node/V8 只使用 `com.apple.security.cs.allow-jit`，因為實測 hardened runtime 下冇呢項會令 Node CodeRange 初始化失敗；其他 runtime executable 唔加額外 entitlement。
+`BOUNDAS_NOTARY_PROFILE` names an `xcrun notarytool` Keychain profile. Never put private keys, Apple ID passwords, or app-specific passwords in the repository. Public mode uses hardened runtime, timestamps, nested Mach-O signing, notarization, stapling, and `codesign`/`spctl` verification; missing credentials stop the build. Bundled Node/V8 uses only `com.apple.security.cs.allow-jit`, which is required for its CodeRange initialization under hardened runtime. Other runtime executables receive no additional entitlement.
 
-`dist/` release output 只保留：
+Release output in `dist/` contains:
 
 ```text
 Boundas Gate.app
@@ -132,9 +132,9 @@ Boundas-Gate-1.2.1-arm64.dmg
 SHA256SUMS.txt
 ```
 
-New User Test 只輸出到 `.build/apps/Boundas Gate New User Test.app`，唔會放入 `dist/`。
+New User Test is written only to `.build/apps/Boundas Gate New User Test.app`, not `dist/`.
 
-## 測試
+## Tests
 
 ```sh
 swift test
@@ -142,12 +142,12 @@ node --test Tests/Gateway/*.test.mjs Tests/Tailscale/*.test.mjs
 (cd Native/Tunnel && go test ./...)
 ```
 
-Gateway integration tests 需要提供已驗證嘅 `BOUNDAS_C2C_ROOT`。Portable release smoke test 會喺隔離 HOME 及 temporary state 執行，唔會改真實 production profile。
+Gateway integration tests require a verified `BOUNDAS_C2C_ROOT`. Portable release smoke tests use an isolated HOME and temporary state, without modifying the real production profile.
 
 ## License
 
-Boundas Gate 自己嘅程式碼使用 MIT License。Node、C2C、cloudflared、Go、Tailscale 同 Sparkle 元件仍然受各自 upstream license 約束；請參閱 packaged Runtime 入面嘅 license 文件。Artwork 嘅公開散佈授權確認狀態見 [artwork provenance](docs/artwork-provenance.md)，唔應由 source code 嘅 MIT License 推斷第三方素材權利。
+Boundas Gate's own source code is MIT licensed. Node, C2C, cloudflared, Go, Tailscale, and Sparkle retain their upstream licenses; see the packaged Runtime license files. See [artwork provenance](docs/artwork-provenance.md) for artwork redistribution authorization. The source-code MIT License does not establish rights to third-party assets.
 
-## 歷史文件
+## Historical documentation
 
-`docs/` 內保留 acceptance、migration、security review 同 architecture contract，當中若有 historical release notes，會標明當時版本及驗收範圍；唔應視為目前 UI workflow。當前 release status 見 [RELEASE_NOTES.md](RELEASE_NOTES.md)。
+`docs/` retains acceptance reports, migration records, security reviews, and architecture contracts. Historical reports describe their recorded versions and acceptance scope, rather than the current UI workflow. See [RELEASE_NOTES.md](RELEASE_NOTES.md) for current release status.

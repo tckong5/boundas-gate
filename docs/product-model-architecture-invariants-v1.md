@@ -1,8 +1,6 @@
 # Boundas Gate — Product Model / Architecture Invariants v1
 
-下一版已確認嘅 Tunnel ownership 目標見
-[Shared Tunnel 架構目標](shared-tunnel-architecture-target.md)。該文件記錄共享登入／
-transport 同獨立 Gate routing 嘅新方向；現有 runtime 尚未完成該重構。
+For the shared-login/transport ownership direction and independent Gate routing, see the [Shared Tunnel architecture target](shared-tunnel-architecture-target.md) and its [implementation report](shared-tunnel-implementation.md). This contract records the underlying v1 semantics.
 
 ## Core invariants
 
@@ -14,15 +12,13 @@ transport 同獨立 Gate routing 嘅新方向；現有 runtime 尚未完成該�
 >
 > Removing a Side Gate never removes the Folder or changes Main Gate state.
 
-呢份係 v1 product contract。之後任何 implementation 同以上四句衝突，都應該當 regression，而唔係再重新討論 UX。
+An implementation that contradicts these invariants is a regression, not a reason to reopen the UX contract.
 
 ---
 
 ## 1. Core model
 
-Gate 係一個獨立管理嘅 MCP endpoint，擁有自己嘅 lifecycle 同 authorization boundary。
-
-Gate 唔等於 Folder，亦唔等於 Tunnel。
+A Gate is an independently managed MCP endpoint with its own lifecycle and authorization boundary. It is distinct from both a Folder and a Tunnel.
 
 ```text
 Gate
@@ -31,34 +27,32 @@ Gate
 └── 0..n Folder Access
 ```
 
-Main Gate：
+Main Gate:
 
 ```text
 1 Gate → 0..n Folders
 ```
 
-Side Gate：
+Side Gate:
 
 ```text
 1 Gate → exactly 1 Folder
 ```
 
-同一個 Folder 可以同時：
+A Folder can belong to both:
 
 ```text
 Main Gate ✓
 Side Gate ✓
 ```
 
-兩者 connection state 必須互相獨立。
+Their connection states must remain independent.
 
 ---
 
-## 2. Gate existence ≠ Folder existence
+## 2. Gate existence is independent of Folders
 
-Gate 必須可以喺 0 Folder 情況正常存在及運作。
-
-合法：
+A Gate must operate normally with zero Folders. Both states are valid:
 
 ```text
 Gate Open
@@ -66,38 +60,21 @@ Gate Open
 0 Folders shared
 ```
 
-亦合法：
-
 ```text
 Gate Open
 2 MCP Connections
 0 Folders shared
 ```
 
-AI call：
+An AI call returning `list_workspaces → []` is normal, not an error.
 
-```text
-list_workspaces → []
-```
-
-係正常結果，唔係 error。
-
-因此 Folder 唔可以係：
-
-- Gate startup prerequisite
-- Tunnel prerequisite
-- MCP authorization prerequisite
-- reconnect prerequisite
-
-移除最後一個 Folder亦唔可以自動拆 Gate。
+Folders must not be prerequisites for Gate startup, a Tunnel, MCP authorization, or reconnection. Removing the final Folder must not automatically decommission the Gate.
 
 ---
 
 ## 3. Runtime Gate status
 
-唔好用一個 Ready boolean代表晒所有事情。
-
-Gate runtime health主要係：
+Do not represent every concern with one Ready boolean. Runtime states include:
 
 - Gate Open
 - Gate Closed
@@ -105,30 +82,22 @@ Gate runtime health主要係：
 - Reopening Gate…
 - Gate Needs Attention
 
-其中：
+**Gate Open = healthy Gate endpoint + healthy required transport/Tunnel.**
 
-**Gate Open = Gate endpoint正常 + required transport/tunnel正常。**
-
-MCP Connections同Folders係獨立資訊。
-
-例如：
+MCP Connections and Folder sharing are separate information:
 
 ```text
 ● Gate Open
 2 MCP Connections · 0 Folders shared
 ```
 
-冇 MCP Connection唔代表 Gate Closed。
-
-冇 Folder亦唔代表 Gate Closed。
-
-Ready 可以繼續用喺 first-run/setup journey，但唔應該成為核心 runtime state。
+Zero Connections or Folders do not imply Gate Closed. Ready can remain a first-run/setup milestone, but must not become the core runtime state.
 
 ---
 
 ## 4. Setup journey
 
-First-run可以保持：
+First-run setup can remain:
 
 ```text
 Local
@@ -140,9 +109,7 @@ MCP Connection
 Ready
 ```
 
-呢個係 setup journey，唔係 Gate state machine。
-
-例如 Gate已經 Open，但冇 MCP authorization，可以顯示：
+This is a setup journey, not the Gate state machine. An open Gate without authorization can show:
 
 ```text
 Gate Open
@@ -154,13 +121,7 @@ Gate Open
 
 ## 5. MCP Connection
 
-User-facing terminology：
-
-**MCP Connection**
-
-代表一個 external MCP client同某個 Gate之間嘅 authorization relationship。
-
-例如：
+Use **MCP Connection** for the authorization relationship between an external MCP client and one Gate:
 
 ```text
 ChatGPT       Authorized
@@ -168,16 +129,9 @@ Claude        Authorized
 Other Client  Invalid
 ```
 
-Authorized 唔等於「而家有 live session」。
+Authorized does not imply a current live session. Do not use Connected/Disconnected without actual runtime-session evidence.
 
-除非真係有 runtime session evidence，唔好用：
-
-- Connected
-- Disconnected
-
-每個 MCP authorization必須只屬於 **一個 Gate**。
-
-核心 security invariant：
+Each authorization belongs to **one Gate**:
 
 ```text
 Main Gate authorization
@@ -187,30 +141,17 @@ Side Gate A authorization
 Side Gate B authorization
 ```
 
-唔可以跨 Gate reuse authorization。
+Authorization cannot be reused across Gates.
 
 ---
 
 ## 6. Folder
 
-User-facing一律叫：
-
-**Folder**
-
-唔好再喺一般 UI混用：
-
-- Workspace
-- Repository
-
-除非功能真係 Git-specific，先用 Repository。
-
-Internal code可以繼續用 `WorkspaceRecord`，唔需要為 terminology立即重構 model names。
+Use **Folder** consistently in ordinary UI instead of mixing Workspace and Repository. Repository is appropriate only for genuinely Git-specific functionality. Internal code can retain `WorkspaceRecord`; terminology alone does not require an immediate model rename.
 
 ---
 
 ## 7. Side Gate membership
-
-Folder本身同 Side Gate membership係兩回事。
 
 ```text
 Folder exists
@@ -218,32 +159,13 @@ Folder exists
 Side Gate exists
 ```
 
-`sideGateAdded` 唔可以只控制 sidebar display。
-
-佢必須真正控制：
-
-- Side Gate startup
-- refresh
-- reconnect
-- diagnostics
-- counts
-- lifecycle operations
-
-Main-only Folder唔應該被 Side Gate batch startup／reconnect碰到。
+`sideGateAdded` must govern real Side startup, refresh, reconnect, diagnostics, counts, and lifecycle operations, not just sidebar visibility. Main-only Folders must not be touched by Side batch startup/reconnect.
 
 ---
 
 ## 8. Remove Side Gate
 
-User action叫：
-
-**Remove Side Gate**
-
-而唔係 Remove Workspace。
-
-呢個操作代表 decommission獨立 Gate，唔係刪 Folder。
-
-流程：
+The action is **Remove Side Gate**, not Remove Workspace. It decommissions an independent Gate without deleting the Folder.
 
 ```text
 Active
@@ -258,106 +180,68 @@ clear runtime credentials
 sideGateAdded = false
 ```
 
-完成後必須保留：
+Preserve:
 
 - Folder identity/path/name
 - Main Gate membership
 - Main Gate sharing state
 - Passcode policy
-- preferred Tunnel provider
+- Preferred Tunnel provider
 
-必須清除／失效：
+Clear or invalidate:
 
 - Side Gate MCP authorizations
-- pairing secrets
-- temporary credentials
-- runtime diagnostics
-- active endpoint binding
-- configured active MCP URL
+- Pairing secrets
+- Temporary credentials
+- Runtime diagnostics
+- Active endpoint binding
+- Configured active MCP URL
 
-可以保留：
+`lastKnownURL` and provider/domain reservation identity may remain as historical/configuration metadata only, never as an active endpoint.
 
-- lastKnownURL
-- provider/domain reservation identity
-
-但只可以係 history/config metadata，唔可以再當 active endpoint。
-
-如果 remove過程失敗：
-
-```text
-Removing Failed
-[ Retry ]
-```
-
-唔可以先隱藏 Side Gate，再留一堆 orphan runtime state。
+If removal fails, retain the Gate with **Removing Failed → Retry**. Never hide it while leaving orphaned runtime state.
 
 ---
 
 ## 9. Passcode
 
-正式採用以下 policy（Security / Robustness Review，2026-10-08）：
+The policy adopted in the 2026-10-08 security review is:
 
-**Passcode Protection = Folder-level policy。**
-
-即：
+**Passcode Protection = Folder-level policy.**
 
 ```text
 Folder A
 Passcode Protection ON
 ```
 
-只要任何 Gate expose Folder A，都需要 obey同一個 Passcode policy。
-
-包括：
+Every Gate exposing Folder A must obey the same policy:
 
 ```text
 Main Gate → Folder A
 Side Gate → Folder A
 ```
 
-原因係目前 UI mental model係：
+The UI mental model is “this Folder has extra protection.” Allowing Side to bypass Main's Passcode requirement would violate that expectation. A future Gate-Folder policy is possible if needed, but v1 avoids that complexity.
 
-> 呢個 Folder有 Extra Protection。
+Main and Side reuse `FolderAccess` generation/unlock/expiry/revocation. Passcode ON does not permanently disable Side access. Side-only Folders have a policy without needing Main sharing.
 
-如果 Main Gate要Passcode，但Side Gate可以繞過，就會違反 user expectation。
+Temporary unlock is **not a global Folder unlock**. Every access key must match:
 
-如果日後真係有需要做到不同 Gate不同policy，再升級成 Gate-Folder policy；v1唔建議增加呢個 complexity。
+- Gate ID, with independent AuthStore/code/key storage per Gate.
+- OAuth credential hash; refresh or credential replacement does not automatically inherit a key.
+- Folder ID, membership epoch, and policy epoch.
+- Conversation metadata; when the app supplies none, explicit `session_id`, still requiring the matching OAuth credential and access key.
+- A maximum of 30 minutes, never exceeding OAuth access-token expiry.
 
-Main Gate 同 Side Gate 共用同一套 `FolderAccess` generate / unlock / expiry / revoke 機制；Passcode ON 唔再永久封鎖 Side Gate。Side-only Folder 亦有 Folder policy，唔需要先經 Main Gate 分享。
+Passcodes expire after five minutes and are single-use. Generate New Code/Invalidate/Revoke clears that Gate's Folder codes/grants. Policy toggles change the shared policy epoch, invalidating previous grants across Main and Side. Gate restart clears temporary codes/grants while retaining persistent OAuth authorization.
 
-Temporary unlock **唔係 Folder global unlock**。每個 access key 必須同時符合：
-
-- Gate ID（每個 Gate 獨立 AuthStore、code / key storage）
-- OAuth credential hash（refresh / 換 credential 唔會自動繼承 key）
-- Folder ID、membership epoch、policy epoch
-- Conversation metadata；AI app 冇提供 metadata 時，用明確 `session_id`，仍須持有相符 OAuth credential + access key
-- 最長 30 分鐘，且唔超過 OAuth access token expiry
-
-Passcode 5 分鐘到期、一次性。Generate New Code / Invalidate / Revoke 只撤銷該 Gate 嘅 Folder codes / grants；policy 開關會改共享 policy epoch，令 Main / Side 舊 grants 一併失效。Gate restart 清空臨時 code / grant，持久 OAuth authorization 保留。
-
-Protected Folder 每次 tool operation（包含 Git / execution reads）前後均重新核對 ACL / policy / grant，唔可以用 Main Gate key 解鎖 Side Gate。
-
-詳見 [security-robustness-review.md](security-robustness-review.md)。
+Protected operations, including Git/execution reads, recheck ACL/policy/grant before and after work. A Main key cannot unlock Side access. See [security-robustness-review.md](security-robustness-review.md).
 
 ---
 
 ## 10. Tunnel
 
-Tunnel只負責：
-
-**令外部可以 reach 到 Gate。**
-
-唔負責：
-
-- OAuth
-- MCP authorization
-- Folder ACL
-- Passcode
-- Gate identity
-
-呢啲全部屬於 Boundas Gate Core。
-
-Architecture：
+A Tunnel provides **external reachability to a Gate**. OAuth, MCP authorization, Folder ACLs, Passcodes, and Gate identity belong to Boundas Gate Core.
 
 ```text
 Gate Core
@@ -370,21 +254,15 @@ TunnelProvider
    └── future providers
 ```
 
-每個 Gate v1只綁一個 active TunnelProvider。
-
-暫時唔做 transparent hot-switch。
-
-換 provider視為 endpoint migration。
+The provider diagram includes future options. Each v1 Gate binds to one active provider. Transparent hot-switching is not implemented; changing providers is endpoint migration.
 
 ---
 
 ## 11. TunnelProvider abstraction
 
-而家先 freeze boundary，唔需要未有 ngrok就抽完整framework。
+Freeze ownership boundaries first rather than extracting a complete framework before an ngrok spike. Extract the common interface during that spike.
 
-ngrok spike時正式抽 common interface。
-
-最低需要支援：
+Minimum operations:
 
 - prepare
 - start
@@ -392,7 +270,7 @@ ngrok spike時正式抽 common interface。
 - status
 - endpoint
 
-Provider可以回報 capabilities，例如：
+Possible capability reports:
 
 - stableEndpoint
 - customDomain
@@ -400,13 +278,11 @@ Provider可以回報 capabilities，例如：
 - perGateEndpoint
 - sharedIngress
 
-Reconnect policy、desired-running、retry/backoff應由 Gate coordinator控制，唔應該塞入每個provider自己管理。
+The Gate coordinator owns reconnect policy, desired-running intent, and retry/backoff. Providers should not each manage those independently.
 
 ---
 
 ## 12. Product terminology
-
-最終 user-facing vocabulary：
 
 - Folder
 - Gate
@@ -416,52 +292,23 @@ Reconnect policy、desired-running、retry/backoff應由 Gate coordinator控制�
 - MCP Connection
 - Passcode Protection
 
-其中：
+**Gate** = independently managed MCP endpoint + authorization boundary + lifecycle.
 
-**Gate**
+**Tunnel** = external reachability mechanism.
 
-= independently managed MCP endpoint + authorization boundary + lifecycle
+**MCP Connection** = external MCP client authorization to one Gate.
 
-**Tunnel**
-
-= external reachability mechanism
-
-**MCP Connection**
-
-= external MCP client authorization to one Gate
-
-**Folder**
-
-= resource exposed through a Gate
+**Folder** = resource exposed through a Gate.
 
 ---
 
-## 13. Implementation priority
+## 13. Original implementation priorities
 
-我會正式排成：
-
-1. **Freeze以上 semantics**
-
-2. **修 Side Gate lifecycle**
-
-   令 `sideGateAdded` 真正貫穿 start / stop / reconnect / refresh / remove。
-
-3. **同步補 Side Gate tests**
-
-   唔好等功能做完先補。
-
-4. **完成 0 Folder Gate**
-
-   由 backend/server/launcher/reconnect到UI全部解除Folder prerequisite。
-
-5. **Cleanup user-facing terminology**
-
-   Folder / Gate / Tunnel / MCP Connection統一。
-
-6. **ngrok spike**
-
-   先驗證 stable endpoint、OAuth callback、streaming、restart、multi-Gate。
-
-7. **spike期間抽 minimal TunnelProvider**
-
-8. **最後做 provider selection / migration UI**
+1. **Freeze these semantics.**
+2. **Fix Side lifecycle:** enforce `sideGateAdded` across start/stop/reconnect/refresh/remove.
+3. **Add Side tests alongside implementation**, not afterward.
+4. **Support zero-Folder Gates:** remove Folder prerequisites across backend/server/launcher/reconnect/UI.
+5. **Unify user-facing terminology:** Folder/Gate/Tunnel/MCP Connection.
+6. **Run an ngrok spike:** first verify stable endpoints, OAuth callbacks, streaming, restart, and multiple Gates.
+7. **Extract a minimal TunnelProvider during the spike.**
+8. **Then implement provider selection/migration UI.**

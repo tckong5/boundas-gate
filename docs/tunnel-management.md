@@ -1,24 +1,24 @@
-# Tunnel 管理入口
+# Tunnel management
 
-## 正常 flow
+## Normal flow
 
-Secure Access inline 顯示真正下一步：Set Up、Sign In、Continue Authorization 或 Repair。正常時顯示 `Tailscale · Connected`，Recheck／Sign Out 收入該 stage 嘅 `…`。Server URL 主要放喺 Connect an AI App；技術資料同既有管理頁降級為 Advanced → Advanced Tunnel Details。
+Secure Access shows the actual next action inline: Set Up, Sign In, Continue Authorization, or Repair. Healthy state shows `Tailscale · Connected`, with Recheck/Sign Out under the stage's `…` menu. The primary Server URL belongs to Connect an AI App. Technical detail and the existing management sheet are available under Advanced → Advanced Tunnel Details.
 
-Open Gate 只開 local MCP／OAuth host。Secure Access 必須由明確操作啟動；background refresh／reconnect 唔會要求互動登入。Provider preflight 同 endpoint checks 係 source of truth，毋須 Done confirmation。
+Open Gate starts only the local MCP/OAuth host. Secure Access requires an explicit action; background refresh/reconnect never requests interactive login. Provider preflight and endpoint checks are the source of truth, without a separate Done confirmation.
 
-## 共用內置 Tunnel
+## Shared embedded Tunnel
 
-新 Main／Side Gates 共用一個 private Tailscale agent／account，Side Gate 使用獨立 URL path、route nonce 同 MCP authorization。新增 Side Gate 唔需要重複登入；已登入時 Set Up 只啟用該 Gate route。既有獨立 Side endpoint 必須明確 migration，唔會靜默改 URL。
+New Main/Side Gates share one private Tailscale agent/account. Each Side Gate has an independent URL path, route nonce, and MCP authorization. Adding a Side Gate requires no repeat login; when already signed in, Set Up enables only that Gate's route. Existing independent Side endpoints require explicit migration and are never silently replaced.
 
-登出共用帳戶前需確認會影響共用該 Tunnel 嘅 Gates。普通登出唔撤銷 MCP authorizations、Folder membership 或 Passcode policy。停止／移除單一 Gate 只清該 Gate runtime／route，唔登出其他 Gate。
+Shared Sign Out requires confirmation that it affects Gates using that Tunnel. Normal sign-out does not revoke MCP authorizations, Folder membership, or Passcode policy. Stopping/removing one Gate affects only its runtime/route and does not sign out other Gates.
 
-外置模式沿用 Mac LocalAPI；登出前保留 confirmation，因為會影響同一裝置其他服務。內置模式毋須另裝外置 Tailscale。登入另一帳戶而 hostname 不符仍會被既有 URL mismatch guard 拒絕，唔偷偷改 Server URL。
+External mode uses the Mac LocalAPI and retains logout confirmation because other services on the device may be affected. Embedded mode needs no separate Tailscale installation. Signing into a different account with a mismatched hostname is rejected by the existing URL guard rather than silently changing the Server URL.
 
-## DNS／repair
+## DNS and repair
 
-本機 DNS failure 唔會當成登入失敗，亦唔會反覆重啟正常 route。Repair network cache 需要明確確認；詳見 [Secure Access DNS troubleshooting](secure-access-dns-troubleshooting.md)。
+A local DNS failure is not treated as a login failure and does not repeatedly restart a healthy route. Repair network cache requires explicit confirmation. See [Secure Access DNS troubleshooting](secure-access-dns-troubleshooting.md).
 
-實作、隔離／migration tests 同收貨結果見：
+Implementation, isolated/migration tests, and acceptance evidence:
 
 - [Shared Tunnel implementation](shared-tunnel-implementation.md)
 - [Main Gate setup journey](main-gate-setup-journey.md)

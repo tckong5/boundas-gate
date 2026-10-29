@@ -17,6 +17,22 @@ export function fileIdentity(value) {
     return `${stat.dev}:${stat.ino}`;
   } catch { return null; }
 }
+// The local app writes this handoff only after resolving the original macOS
+// bookmark. A matching inode alone never authorizes identity replacement.
+function sameFolderIdentity(root, record, current = fileIdentity(record.path)) {
+  if (!current || fileIdentity(record.path) !== current
+      || record.folderFileIdentity && record.folderFileIdentity !== current) return false;
+  if (!root.fileIdentity) return root.path === record.path;
+  if (root.fileIdentity === current) return true;
+  const proof = record.folderIdentityRecovery;
+  const oldParts = root.fileIdentity.split(':');
+  const newParts = current.split(':');
+  return Boolean(proof && typeof record.folderBookmark === 'string' && record.folderBookmark.length > 0
+    && proof.previous === root.fileIdentity && proof.current === current
+    && proof.path === root.path && record.path === root.path
+    && /^\d+:\d+$/.test(root.fileIdentity) && /^\d+:\d+$/.test(current)
+    && oldParts[0] !== newParts[0] && oldParts[1] === newParts[1]);
+}
 export class Registry {
   constructor({ directory = process.env.BOUNDAS_GATEWAY_DIR ?? defaultProductPath('gateway'), allowlistFile = workspaceFile } = {}) { this.directory = directory; this.allowlistFile = allowlistFile; }
   ensure() {
@@ -98,11 +114,11 @@ export class Registry {
       const currentIdentity = item.folderFileIdentity ?? fileIdentity(workspace.root);
       const sameSource = old?.sourceID?.toLowerCase() === normalizedSourceID;
       if (old && sameSource) {
-        if (old.fileIdentity ? old.fileIdentity !== currentIdentity : old.path !== workspace.root) {
+        if (!sameFolderIdentity(old, item, currentIdentity)) {
           throw new Error('Folder 身份已改變，請喺 App 重新定位；未有保留原有授權。');
         }
       }
-      const preservePolicy = old && sameSource && (old.fileIdentity ? old.fileIdentity === currentIdentity : old.path === workspace.root);
+      const preservePolicy = old && sameSource && sameFolderIdentity(old, item, currentIdentity);
       return { id: item.c2cID, sourceID: item.id.toLowerCase(), name: item.name, path: workspace.root, fileIdentity: item.folderFileIdentity ?? fileIdentity(workspace.root), enabled: true,
         codeRequired: preservePolicy ? old.codeRequired ?? false : false,
         codeEpoch: preservePolicy ? old.codeEpoch ?? randomBytes(16).toString('hex') : randomBytes(16).toString('hex'),
@@ -113,6 +129,24 @@ export class Registry {
     const config = { ...previous, roots: [...enabled, ...disabled] };
     secureWrite(path.join(this.directory, 'config.json'), config);
     return config;
+  }
+  synchronizeFolderIdentities() {
+    const config = this.read();
+    if (!config) return;
+    const added = this.addedFolders();
+    let changed = false;
+    const roots = config.roots.map(root => {
+      const matches = added.filter(record => record.id?.toLowerCase() === root.sourceID.toLowerCase() && record.c2cID === root.id);
+      if (matches.length !== 1) return root;
+      const record = matches[0];
+      const current = fileIdentity(record.path);
+      if (!sameFolderIdentity(root, record, current)) return root;
+      if (root.path === record.path && root.fileIdentity === current && root.name === record.name) return root;
+      changed = true;
+      return { ...root, path: record.path, name: record.name, fileIdentity: current };
+    });
+    // Preserve enabled, epochs, Passcodes, transport and all other config.
+    if (changed) secureWrite(path.join(this.directory, 'config.json'), { ...config, roots });
   }
   connectionScope() { return `bg.instance.${this.read().id}`; }
   requireConnection(scopes) {
@@ -138,7 +172,7 @@ export class Registry {
     if (old) {
       if (old.sourceID === record.id.toLowerCase()) {
         const currentIdentity = record.folderFileIdentity ?? fileIdentity(record.path);
-        if (old.fileIdentity ? old.fileIdentity !== currentIdentity : old.path !== record.path) {
+        if (!sameFolderIdentity(old, record, currentIdentity)) {
           throw new Error('Folder 身份已改變，未有保留原有授權。');
         }
         if (old.path === record.path && old.fileIdentity === currentIdentity) return old;

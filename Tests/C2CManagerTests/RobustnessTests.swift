@@ -246,6 +246,32 @@ final class RobustnessTests: XCTestCase {
         XCTAssertEqual(moved.path, WorkspaceStore.canonicalPath(movedPath.path))
     }
 
+    func testFolderBookmarkRepairsDeviceIdentityAfterRemountWithoutChangingFolderIdentity() throws {
+        let root = try temporaryRoot(); defer { try? FileManager.default.removeItem(at: root) }
+        let folder = root.appendingPathComponent("Remounted")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let file = root.appendingPathComponent("workspaces.json")
+        let store = try WorkspaceStore(configURL: file, automaticallyRefresh: false)
+        XCTAssertTrue(store.addPath(folder.path))
+        let original = try XCTUnwrap(store.workspaces.first)
+        let inode = try XCTUnwrap(original.folderFileIdentity?.split(separator: ":").last)
+        var remounted = [original]
+        remounted[0].folderFileIdentity = "999999:\(inode)"
+        try JSONEncoder().encode(remounted).write(to: file)
+
+        let restored = try WorkspaceStore(configURL: file, automaticallyRefresh: false)
+        let repaired = try XCTUnwrap(restored.workspaces.first)
+        XCTAssertEqual(repaired.id, original.id)
+        XCTAssertEqual(repaired.c2cID, original.c2cID)
+        XCTAssertEqual(repaired.folderFileIdentity, WorkspaceStore.fileIdentity(folder.path))
+        XCTAssertEqual(repaired.folderIdentityRecovery?.previous, remounted[0].folderFileIdentity)
+        XCTAssertEqual(repaired.folderIdentityRecovery?.current, repaired.folderFileIdentity)
+        XCTAssertEqual(repaired.folderIdentityRecovery?.path, original.path)
+        let saved = try JSONDecoder().decode([WorkspaceRecord].self, from: Data(contentsOf: file))
+        XCTAssertEqual(saved.first?.folderIdentityRecovery, repaired.folderIdentityRecovery)
+        XCTAssertFalse(repaired.needsFolderLocation)
+    }
+
     func testMissingFolderRemainsUnresolvedUntilLocate() throws {
         let root = try temporaryRoot(); defer { try? FileManager.default.removeItem(at: root) }
         let folder = root.appendingPathComponent("Missing")
@@ -272,6 +298,7 @@ final class RobustnessTests: XCTestCase {
         try FileManager.default.createDirectory(at: old, withIntermediateDirectories: true)
         let restored = try WorkspaceStore(configURL: file, automaticallyRefresh: false)
         XCTAssertTrue(try XCTUnwrap(restored.workspaces.first).needsFolderLocation)
+        XCTAssertNil(restored.workspaces.first?.folderIdentityRecovery)
     }
 
     func testLegacyRecordGainsStableReferenceWithoutChangingIdentity() throws {

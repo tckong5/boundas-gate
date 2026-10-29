@@ -11,6 +11,9 @@ struct WorkspaceRecord: Codable, Identifiable, Hashable {
     /// POSIX device/inode identity used by the Gateway as a substitution guard.
     /// Older records legitimately omit this value.
     var folderFileIdentity: String?
+    /// Written only after bookmark-backed remount verification. Allows the
+    /// Gateway to replace its cached POSIX hint without resetting policy.
+    var folderIdentityRecovery: FolderIdentityRecovery?
     var lastObservedMCPURL: String?
     var previousMCPURL: String?
     var configuredMCPURL: String?
@@ -59,6 +62,12 @@ struct WorkspaceRecord: Codable, Identifiable, Hashable {
               let configured = EndpointAddress.mcpURL(configuredMCPURL) else { return .unconfirmed }
         return current == configured ? .matches : .needsUpdate
     }
+}
+
+struct FolderIdentityRecovery: Codable, Hashable {
+    let previous: String
+    let current: String
+    let path: String
 }
 
 enum SideGateRemovalState: String, Codable { case removing, failed }

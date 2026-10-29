@@ -96,6 +96,9 @@ try {
     let closing = false;
     const close = () => { if (!closing) { closing = true; void gateway.close().finally(() => process.exit(0)); } };
     process.on('SIGTERM', close); process.on('SIGINT', close);
+  } else if (action === 'sync-folder-identities') {
+    await withLock(registry.directory, async () => registry.synchronizeFolderIdentities());
+    output(await status());
   } else if (action === 'configure') {
     const { Workspace } = await loadBackend(backendRoot);
     await withLock(registry.directory, async () => registry.configure(JSON.parse(input).selectedIDs, Workspace));

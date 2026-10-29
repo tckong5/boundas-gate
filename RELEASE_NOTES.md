@@ -1,3 +1,34 @@
+# Boundas Gate 1.2.1（production build 8）— 已發布
+
+此 bug-fix release 已完成 Production 驗收，GitHub Release：
+[Boundas Gate v1.2.1](https://github.com/tckong5/boundas-gate/releases/tag/v1.2.1)。
+
+## 修正
+
+- 修正 macOS 重啟／重新掛載後 filesystem device ID 改變，令原有 Folder 被錯誤拒絕分享嘅問題。只會喺原有 bookmark 成功驗證、路徑及 inode 符合安全檢查後恢復 identity。
+- WorkspaceStore 將已驗證嘅 identity recovery 同步到 Gateway registry，保留 Folder UUID、c2cID、Gate 設定、MCP URL、OAuth credentials、Passcode policy 同 authorization epoch；同步唔會將停用嘅 Folder 自動重新分享。
+- 保留 fail-closed：Folder 被替換、身份未能確認，或缺少有效 recovery 證據時仍然拒絕存取；唔會單靠相同 inode 接受新 Folder。
+- 修正 Main Gate 儲存失敗時只短暫 loading、冇清楚回饋嘅問題，並提示需要重新定位嘅 Folder。
+- 包含 v1.2.0 發布後已完成嘅 Folder relocation 支援；移動／重新命名仍保留既有身份及授權。
+
+## Release identity／驗證
+
+- Version：`1.2.1`；production build：`8`；bundle identifier：`com.boundasgate.app`。
+- 使用既有 **ad-hoc signing、未 Apple notarized** 發布方式。macOS Gatekeeper 可能需要手動選擇 Open Anyway；Developer ID／notarization 刻意暫緩，唔係本版本嘅發布 blocker。
+- Sparkle integration 保留；production appcast／update feed 尚未啟用。
+- Identity hotfix 必要檢查已通過：原 Folder remount recovery、replacement rejection、Gateway／WorkspaceStore 同步及既有 policy 保留。Production v1.2.1 已驗收 Gateway、既有 Folder、authenticated MCP read 同 Main Gate 儲存。
+- Release 由已驗證嘅隔離 source snapshot 建立，只納入已完成嘅 identity hotfix 同必要版本／說明資料。
+
+## Release artifacts
+
+```text
+Boundas-Gate-1.2.1-arm64.zip
+Boundas-Gate-1.2.1-arm64.dmg
+SHA256SUMS.txt
+```
+
+---
+
 # Boundas Gate 1.2.0（production build 7）— 已發布
 
 v1.2.0 係已發布嘅 open-source public beta，GitHub Release：
@@ -22,9 +53,9 @@ v1.2.0 係已發布嘅 open-source public beta，GitHub Release：
 - Local/test build 同 public Developer ID / notarization path 分開；public mode 缺少 credentials 時會直接 fail，唔會退回 ad hoc signing。
 - Node/V8 hardened-runtime entitlement 已經以實測收窄至 `com.apple.security.cs.allow-jit`；冇加入 broad executable-memory 或其他額外 entitlement。
 
-## 發布後 main 嘅未發布變更
+## v1.2.0 發布後進展
 
-- Folder relocation 已加入 main（commit `8bc7f59`）：Folder rename／move 可以保留原有 UUID、c2cID、Gate、OAuth 同 passcode policy。呢項不屬於 v1.2.0 release asset。
+- Folder relocation 已加入 main（commit `8bc7f59`），並包含於 v1.2.1：Folder rename／move 可以保留原有 UUID、c2cID、Gate、OAuth 同 passcode policy。呢項不屬於 v1.2.0 release asset。
 - Local Network permission investigation 暫時冇需要修改 Boundas code；舊 Tailscale Network Extension 係主要懷疑來源，但停用後重開機驗收仍待完成，未宣稱根因已 conclusively verified。
 
 ## Release identity
@@ -92,4 +123,4 @@ New User Test 會留喺：
 
 ## 下一步
 
-後續可選工作係設定正式 appcast URL，另行產生及發布 Sparkle signed updates；目前 feed 未啟用。Production migration、production MCP read、Quit／reopen 同 Folder relocation acceptance 已完成，唔需要重做。Developer ID／notarization 因未加入 Apple Developer Program 而刻意暫緩；未有 v1.2.1 發布或日期。
+後續可選工作係設定正式 appcast URL，另行產生及發布 Sparkle signed updates；目前 feed 未啟用。Production migration、production MCP read、Quit／reopen 同 Folder relocation acceptance 已完成，唔需要重做。Developer ID／notarization 因未加入 Apple Developer Program 而刻意暫緩；v1.2.1 release 見本文開首。

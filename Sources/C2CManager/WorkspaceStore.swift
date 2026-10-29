@@ -481,7 +481,9 @@ final class WorkspaceStore: ObservableObject {
         if workspaces != saved, !save() {
             throw WorkspaceStoreError.persistence(lastPersistenceError ?? CocoaError(.fileWriteUnknown))
         }
-        if workspaces != saved { gatewayPathSyncPending = true }
+        if workspaces != saved || workspaces.contains(where: { $0.folderIdentityRecovery != nil }) {
+            gatewayPathSyncPending = true
+        }
     }
 
     private func synchronizeRelocatedFolders() async {
@@ -504,8 +506,9 @@ final class WorkspaceStore: ObservableObject {
     }
 
     private func synchronizeGatewayPaths() async {
-        let selected = mainGateWorkspaces.map { $0.id.uuidString.lowercased() }
-        guard await gateway.perform("configure", selectedIDs: selected) else { return }
+        // Reconcile existing roots only: recovery must not enable every added
+        // Folder or reset disabled-root authorization epochs.
+        guard await gateway.perform("sync-folder-identities") else { return }
         gatewayPathSyncPending = false
         for connection in sideGateConnections.values { await connection.refresh(background: true) }
     }
@@ -514,25 +517,50 @@ final class WorkspaceStore: ObservableObject {
         var updated = records
         for index in updated.indices {
             let original = updated[index]
-            if let expectedIdentity = original.folderFileIdentity,
-               let currentIdentity = fileIdentity(original.path), expectedIdentity != currentIdentity {
-                // Keep the record unavailable until the user explicitly
-                // locates it; never bind to the replacement automatically.
-                continue
-            }
             if let bookmark = original.folderBookmark, let resolved = resolveFolderBookmark(bookmark) {
                 let currentPath = canonicalPath(original.path)
                 if resolved.path != currentPath {
+                    // A bookmark can prove that the Folder moved. If the old
+                    // path is occupied by another object, require the old
+                    // identity to match before following the bookmark; this
+                    // keeps replacement-at-the-old-path fail-closed.
                     if FileManager.default.fileExists(atPath: original.path) {
                         let oldIdentity = fileIdentity(original.path)
-                        guard oldIdentity != nil, oldIdentity == fileIdentity(resolved.path) else { continue }
+                        guard let expectedIdentity = original.folderFileIdentity,
+                              oldIdentity == expectedIdentity else { continue }
                     }
                     guard !updated.enumerated().contains(where: { $0.offset != index && canonicalPath($0.element.path) == resolved.path }) else { continue }
-                    updated[index].path = resolved.path
                 }
-                updated[index].folderFileIdentity = fileIdentity(resolved.path)
+                if let expectedIdentity = original.folderFileIdentity,
+                   let resolvedIdentity = fileIdentity(resolved.path),
+                   expectedIdentity != resolvedIdentity,
+                   !sameInode(expectedIdentity, resolvedIdentity) {
+                    // A changed inode indicates replacement. A changed
+                    // device with the same inode is the remount case that a
+                    // bookmark can safely recover.
+                    continue
+                }
+                // The bookmark is the stable proof. Refresh the cached
+                // device/inode hint after a remount instead of treating a
+                // changed device number as a replacement Folder.
+                guard let resolvedIdentity = fileIdentity(resolved.path) else { continue }
+                if let previous = original.folderFileIdentity, previous != resolvedIdentity {
+                    // The recovery handoff is intentionally limited to an
+                    // unchanged path and inode, verified by the bookmark.
+                    guard resolved.path == original.path else { continue }
+                    updated[index].folderIdentityRecovery = FolderIdentityRecovery(
+                        previous: previous, current: resolvedIdentity, path: resolved.path)
+                }
+                updated[index].path = resolved.path
+                updated[index].folderFileIdentity = resolvedIdentity
                 if resolved.stale { updated[index].folderBookmark = makeFolderBookmark(for: resolved.path) }
             } else if FileManager.default.fileExists(atPath: original.path) {
+                if let expectedIdentity = original.folderFileIdentity,
+                   let currentIdentity = fileIdentity(original.path), expectedIdentity != currentIdentity {
+                    // Without a resolvable bookmark there is no safe proof
+                    // that a remounted path is still the authorized Folder.
+                    continue
+                }
                 // Legacy records gain the stable reference lazily while their
                 // original location is still available.
                 updated[index].folderBookmark = makeFolderBookmark(for: original.path)
@@ -625,6 +653,11 @@ final class WorkspaceStore: ObservableObject {
               let device = attributes[.systemNumber] as? NSNumber,
               let inode = attributes[.systemFileNumber] as? NSNumber else { return nil }
         return "\(device.stringValue):\(inode.stringValue)"
+    }
+
+    private static func sameInode(_ lhs: String, _ rhs: String) -> Bool {
+        lhs.split(separator: ":", maxSplits: 1).dropFirst().first ==
+            rhs.split(separator: ":", maxSplits: 1).dropFirst().first
     }
 
     static func c2cID(for canonicalPath: String) -> String {

@@ -48,7 +48,7 @@ function result(data) { return { content: [{ type: 'text', text: JSON.stringify(
 function failure(error) { return { content: [{ type: 'text', text: JSON.stringify({ error: error.code ?? 'OPERATION_FAILED', message: error.message }) }], isError: true }; }
 export function makeMcpServer(backend, registry, access = new FolderAccess(registry), verifyCredential, activity) {
   const { McpServer, z, Workspace, gitInfo, gitStatus, gitDiff, searchWorkspace } = backend;
-  const server = new McpServer({ name: 'Boundas Gate', version: '1.2.0' }, { capabilities: { tools: {} }, instructions: note });
+  const server = new McpServer({ name: 'Boundas Gate', version: '1.2.1' }, { capabilities: { tools: {} }, instructions: note });
   const rootIDShape = z.string().regex(/^[a-f0-9]{12}$/).describe('ID returned by list_workspaces; never a folder path.');
   const rootID = registry.sideMode ? rootIDShape.default(registry.read().id) : rootIDShape;
   const accessKey = z.string().max(128).optional().describe('Temporary access_key returned by unlock_workspace. Required only for a folder with access-code protection enabled.');

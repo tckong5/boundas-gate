@@ -270,7 +270,11 @@ private struct ManagerWindow: View {
                     }
                     if sharedSelection != savedSharedSelection {
                         Button("儲存變更") {
-                            Task { _ = await gateway.perform("configure", selectedIDs: sharedSelection.sorted()) }
+                            Task {
+                                if !(await gateway.perform("configure", selectedIDs: sharedSelection.sorted())) {
+                                    store.alertMessage = gateway.userFacingMessage ?? "未能儲存分享變更，請重新檢查後再試。"
+                                }
+                            }
                         }
                         .buttonStyle(.borderedProminent)
                         .disabled(gateway.working || !gateway.statusConfirmed)
@@ -377,14 +381,16 @@ private struct ManagerWindow: View {
     private func mainFolderLabel(_ workspace: WorkspaceRecord) -> some View {
         sidebarFolderLabel(workspace) {
             FolderSharingDot(isShared: sharedSelection.contains(workspace.id.uuidString.lowercased()),
-                             color: sharedSelection.contains(workspace.id.uuidString.lowercased())
+                             color: workspace.needsFolderLocation ? .orange : sharedSelection.contains(workspace.id.uuidString.lowercased())
                                 ? (gateway.sidebarConnectionReady ? .green : .orange) : .secondary.opacity(0.35)) {
                 let id = workspace.id.uuidString.lowercased()
                 if sharedSelection.contains(id) { sharedSelection.remove(id) }
                 else { sharedSelection.insert(id) }
             }
-            .disabled(gateway.working || !gateway.statusConfirmed || store.busy[workspace.id] != nil)
-            .help(sharedSelection.contains(workspace.id.uuidString.lowercased()) ? "Stop sharing through Main Gate" : "Share through Main Gate")
+            .disabled(workspace.needsFolderLocation || gateway.working || !gateway.statusConfirmed || store.busy[workspace.id] != nil)
+            .help(workspace.needsFolderLocation
+                  ? "Folder identity needs attention. Use Locate Folder… to reconnect it."
+                  : sharedSelection.contains(workspace.id.uuidString.lowercased()) ? "Stop sharing through Main Gate" : "Share through Main Gate")
             .accessibilityLabel("Main Gate access for \(workspace.name)")
             .accessibilityValue(sharedSelection.contains(workspace.id.uuidString.lowercased()) ? "On" : "Off")
         }

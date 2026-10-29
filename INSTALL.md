@@ -1,4 +1,4 @@
-# Boundas Gate 1.2.0
+# Boundas Gate 1.2.1
 
 支援 Apple Silicon Mac，macOS 14 或以上。
 
